@@ -698,11 +698,18 @@ def extract_circuit(
                 perm = {v: k for k, v in perm.items()}
                 neighbors2 = [neighbors[perm[i]] for i in range(len(neighbors))]
                 m2 = bi_adj(g, neighbors2, frontier)
+
+                row_states = None
+                if current_states is not None:
+                    # For every vertex 'v' in the frontier (which is a row in m2),
+                    # find its logical qubit index 'q', and get the state of 'q'.
+                    row_states = [current_states[qubit_map[v]] for v in frontier]
+
                 if optimize_cnots > 0:
-                    cnots = m2.to_cnots(optimize=True)
+                    cnots = m2.to_cnots(optimize=True, states=row_states)
                 else:
-                    cnots = m2.to_cnots(optimize=False)
-                # Since the matrix is not square, the algorithm sometimes introduces duplicates
+                    cnots = m2.to_cnots(optimize=False, states=row_states)
+
                 cnots = filter_duplicate_cnots(cnots)
 
                 if greedy_operations is not None:
