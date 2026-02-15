@@ -604,7 +604,8 @@ def extract_circuit(
         optimize_czs: bool = True,
         optimize_cnots: int = 2,
         up_to_perm: bool = False,
-        quiet: bool = True
+        quiet: bool = True,
+        initial_states: Optional[List[int]] = None # List of size n_outputs
         ) -> Circuit:
     """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`, 
     it extracts its equivalent set of gates into an instance of :class:`~pyzx.circuit.Circuit`.
@@ -650,10 +651,21 @@ def extract_circuit(
 
     czs_saved = 0
     q: Union[float, int]
+
+    # If initial_states is provided, we disable 'greedy' optimization
+    # because greedy_reduction() is not aware of the forbidden CNOTs.
+    # We force the code to use the matrix/gauss approach.
+    current_states = None
+    if initial_states is not None:
+        if len(initial_states) != len(outputs):
+            raise ValueError("initial_states length must match number of outputs")
+        current_states = list(initial_states)
+        if not quiet: print(f"State map provided: Disabling greedy optimization to enforce Safe CNOTs.\n{current_states}")
+        optimize_cnots = 1 # Force usage of matrix approach (gauss)
     
     while True:
         # preprocessing
-        czs_saved += clean_frontier(g, c, frontier, qubit_map, optimize_czs)
+        czs_saved += clean_frontier(g, c, frontier, qubit_map, optimize_czs, current_states)
         
         # Now we can proceed with the actual extraction
         # First make sure that frontier is connected in correct way to inputs
