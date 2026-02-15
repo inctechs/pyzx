@@ -207,6 +207,42 @@ class Mat2(object):
 
             p = i0
             while p < i1:
+                if states is not None:
+                    # 1. Find all rows in this column (at or below pivot) that have a 1
+                    candidates = [r for r in range(pivot_row, rows) if self.data[r][p] != 0]
+
+                    # 2. Search for an UP row (hero) among the candidates
+                    hero_index = -1
+                    for i, r_idx in enumerate(candidates):
+                        if states[r_idx] == 1:
+                            hero_index = i
+                            break
+
+                    # 3. If a Hero exists, use them to eliminate everyone else
+                    if hero_index != -1:
+                        hero_row = candidates[hero_index]
+
+                        # This generates only (UP -> UP) or (UP -> DOWN) CNOTs, which are safe.
+                        for r_target in candidates:
+                            if r_target == hero_row: continue
+
+                            self.row_add(hero_row, r_target)
+                            if x is not None: x.row_add(hero_row, r_target)
+                            if y is not None: y.col_add(r_target, hero_row)
+
+                        # Finally, move the Hero to the correct pivot position
+                        if hero_row != pivot_row:
+                            self.row_add(hero_row, pivot_row)
+                            if x is not None: x.row_add(hero_row, pivot_row)
+                            if y is not None: y.col_add(pivot_row, hero_row)
+
+                        # Mark this column as solved and skip the standard logic below
+                        pivot_cols.append(p)
+                        pivot_row += 1
+                        p += 1
+                        continue
+                    else:
+                        print("no hero found in column", p, "for rows", list(range(pivot_row, rows)))
                 for r0 in range(pivot_row, rows):
                     if self.data[r0][p] != 0:
                         if r0 != pivot_row:
