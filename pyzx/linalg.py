@@ -145,7 +145,7 @@ class Mat2(object):
         """Permute the columns of the matrix according to the permutation p."""
         self.data = [[self.data[i][j] for j in p] for i in range(self.rows())]
     
-    def gauss(self, full_reduce:bool=False, x:Any=None, y:Any=None, blocksize:int=6, pivot_cols:List[int]=[]) -> int:
+    def gauss(self, full_reduce:bool=False, x:Any=None, y:Any=None, blocksize:int=6, pivot_cols:List[int]=[], states:Any=None) -> int:
         """Compute the echelon form. Returns the number of non-zero rows in the result, i.e.
         the rank of the matrix.
 
@@ -187,6 +187,17 @@ class Mat2(object):
                 t = tuple(self.data[r][i0:i1])
                 if not any(t): continue
                 if t in chunks:
+                    if states is not None:
+                        source_row = chunks[t]
+                        target_row = r
+                        # Check Forbidden: Source is DOWN (0) and Target is UP (1)
+                        if states[source_row] == 0 and states[target_row] == 1:
+                            # We skip the elimination here to avoid the bad CNOT.
+                            # Instead, we make 'r' (which is UP) the new representative 
+                            # for this pattern. Future rows with this pattern will 
+                            # use this safe 'UP' row as their source.
+                            chunks[t] = r
+                            continue
                     #print('hit (down)', r, chunks[t], t, i0, i1)
                     self.row_add(chunks[t], r)
                     if x is not None: x.row_add(chunks[t], r)
