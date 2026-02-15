@@ -518,7 +518,8 @@ def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map:
 
 
 def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
-                   qubit_map: Dict[VT, int], optimize_czs: bool = True) -> int:
+                   qubit_map: Dict[VT, int], optimize_czs: bool = True,
+                   current_states: Optional[List[int]] = None) -> int:
     """Remove single qubit gates from the frontier and any CZs between the vertices in the frontier
     Returns the number of CZs saved if `optimize_czs` is True; otherwise returns 0"""
     phases = g.phases()
@@ -531,6 +532,11 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
         if g.edge_type(e) == EdgeType.HADAMARD:
             c.add_gate("HAD", q)
             g.set_edge_type(e, EdgeType.SIMPLE)
+            # UPDATE STATE: Toggle 0 <-> 1
+            if current_states is not None:
+                # Assuming H toggles the state (Up (1) <-> Down (0))
+                current_states[qubit_map[v]] = 1 - current_states[qubit_map[v]]
+                print(f"Qubit {q} flipped to {current_states[q]}")
         if phases[v]:
             c.add_gate("ZPhase", q, phases[v])
             g.set_phase(v, 0)
