@@ -200,36 +200,62 @@ def find_minimal_sums(m: Mat2, reversed_search=False) -> Optional[Tuple[int, ...
         combs = combs2
 
 
-def greedy_reduction(m: Mat2) -> Optional[List[Tuple[int, int]]]:
+def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int = 0) -> Optional[List[Tuple[int, int]]]:
     """Returns a list of tuples (r1,r2) that specify which row should be added to which other row
-    in order to reduce one row of m to only contain a single 1. 
-    Used in :func:`extract_circuit` and :func:`lookahead_extract_base`"""
+    in order to reduce one row of m to only contain a single 1.
+    Used in :func:`extract_circuit` and :func:`lookahead_extract_base`.
+
+    If states is provided, prefers fault-tolerant CNOTs (avoids control=|0>, target=|1>).
+    threshold: accept a safe CNOT even if it reduces up to `threshold` fewer 1s than
+    the best available reduction. Only has effect when states is provided and the best
+    candidate is a bad CNOT."""
     indicest = find_minimal_sums(m)
     if indicest is None: return indicest
     indices = list(indicest)
-    rows = {i:m.data[i] for i in indices}
+    rows = {i: m.data[i] for i in indices}
     weights: Dict[int,int] = {i: sum(r) for i,r in rows.items()}
     result = []
-    while len(indices)>1:
-        best = (-1,-1)
+    while len(indices) > 1:
+        best = (-1, -1)
+        best_is_bad = True
         reduction = -10000
+        best_safe = (-1, -1)
+        best_safe_reduction = -10000
         for i in indices:
             for j in indices:
                 if j <= i: continue
-                w = sum(xor_rows(rows[i],rows[j]))
-                if weights[i] - w > reduction:
-                    best = (j,i) # "Add row j to i"
-                    reduction = weights[i] - w
-                if weights[j] - w > reduction:
-                    best = (i,j)
-                    reduction = weights[j] - w
-        result.append(best)
-        control, target = best
-        rows[target] = xor_rows(rows[control],rows[target])
-        weights[target] = weights[target] - reduction
+                w = sum(xor_rows(rows[i], rows[j]))
+                # Option A: add i to j (control=i, target=j)
+                red_A = weights[j] - w
+                bad_A = (states is not None and states[i] == 0 and states[j] == 1)
+                # Option B: add j to i (control=j, target=i)
+                red_B = weights[i] - w
+                bad_B = (states is not None and states[j] == 0 and states[i] == 1)
+                for (red, bad, candidate) in [(red_A, bad_A, (i,j)), (red_B, bad_B, (j,i))]:
+                    if red > reduction:
+                        best = candidate
+                        reduction = red
+                        best_is_bad = bad
+                    elif red == reduction and best_is_bad and not bad:
+                        best = candidate
+                        best_is_bad = False
+                    if not bad and red > best_safe_reduction:
+                        best_safe = candidate
+                        best_safe_reduction = red
+
+        if states is not None and best_is_bad and best_safe != (-1,-1) and best_safe_reduction >= reduction - threshold:
+            chosen = best_safe
+            chosen_reduction = best_safe_reduction
+        else:
+            chosen = best
+            chosen_reduction = reduction
+
+        result.append(chosen)
+        control, target = chosen
+        rows[target] = xor_rows(rows[control], rows[target])
+        weights[target] = weights[target] - chosen_reduction
         indices.remove(control)
     return result
-
 
 def flat_indices(m: Mat2, indices: List[int]) -> Tuple[List[Tuple[int, int]], int]:
     """Given a matrix and a list of row indices that have to be added together,
@@ -680,7 +706,7 @@ def extract_circuit(
         m = bi_adj(g, neighbors, frontier)
         if all(sum(row) != 1 for row in m.data):  # No easy vertex
             if optimize_cnots > 1:
-                greedy_operations = greedy_reduction(m)
+                greedy_operations = greedy_reduction(m, states=current_states, threshold=1)
             else:
                 greedy_operations = None
 
