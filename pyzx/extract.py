@@ -256,6 +256,7 @@ def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int
         rows[target] = xor_rows(rows[control], rows[target])
         weights[target] = weights[target] - chosen_reduction
         indices.remove(control)
+        print(f"Greedy reduction places CNOTs: {result}\nWith reduction: {chosen_reduction}")
     return result
 
 def flat_indices(m: Mat2, indices: List[int]) -> Tuple[List[Tuple[int, int]], int]:
@@ -537,7 +538,6 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
             if current_states is not None:
                 # Assuming H toggles the state (Up (1) <-> Down (0))
                 current_states[qubit_map[v]] = 1 - current_states[qubit_map[v]]
-                print(f"Qubit {q} flipped to {current_states[q]}")
         if phases[v]:
             c.add_gate("ZPhase", q, phases[v])
             g.set_phase(v, 0)
