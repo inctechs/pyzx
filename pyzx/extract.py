@@ -18,19 +18,18 @@ __all__ = ['extract_circuit', 'extract_simple', 'graph_to_swaps', 'extract_cliff
            'lookahead_extract_base', 'lookahead_full', 'lookahead_fast', 'lookahead_extract']
 
 from fractions import Fraction
-import itertools
 from typing_extensions import deprecated
 
 from .utils import EdgeType, VertexType, toggle_edge
 from .linalg import Mat2, Z2
-from .simplify import id_simp, tcount, full_reduce, is_graph_like, pivot_simp
+from .simplify import id_simp, full_reduce, is_graph_like, pivot_simp
 from .rewrite_rules import *
 from .circuit import Circuit
-from .circuit.gates import Gate, ParityPhase, CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP, InitAncilla
+from .circuit.gates import CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP
 
 from .graph.base import BaseGraph, VT, ET
 
-from typing import List, Optional, Tuple, Dict, Set, Union, Iterator
+from typing import List, Optional, Tuple, Dict, Set, Union
 
 
 def bi_adj(g: BaseGraph[VT,ET], vs:List[VT], ws:List[VT]) -> Mat2:
