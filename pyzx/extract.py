@@ -1504,3 +1504,55 @@ def lookahead_full(g: BaseGraph[VT, ET], optimize_for_depth: bool = False, up_to
         if d1 < d:
             c = c1
     return c
+
+def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, any]:
+    """Count bad CNOTs in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state,
+    CNOT flips the target if control is |1>. All other gates are ignored.
+
+    A CNOT is 'bad' (non-FT) when the control is |0> and target is |1>.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts and a 'details' list
+        with one entry per CNOT containing gate index, qubit indices,
+        their states at that point, and whether it was bad.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1
+        elif name == 'CNOT':
+            ctrl, tgt = gate.control, gate.target
+            is_bad = (states[ctrl] == 0 and states[tgt] == 1)
+            details.append({
+                'gate_index': idx,
+                'control':    ctrl,
+                'target':     tgt,
+                'ctrl_state': states[ctrl],
+                'tgt_state':  states[tgt],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+        # print(f"states: {states}, gate: {gate}")
+
+    # details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total CNOTs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    else:
+        print(f"Total CNOTs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
