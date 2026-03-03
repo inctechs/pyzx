@@ -224,13 +224,15 @@ def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int
             for j in indices:
                 if j <= i: continue
                 w = sum(xor_rows(rows[i], rows[j]))
-                # Option A: add i to j (control=i, target=j)
-                red_A = weights[j] - w
+                # Option A: add j to i which later translates to (control=j, target=i)
+                # NOTE: row addition according to Z parity, hence adding row j to i results
+                # in CNOT with control i and target j
+                red_A = weights[i] - w
                 bad_A = (states is not None and states[i] == 0 and states[j] == 1)
-                # Option B: add j to i (control=j, target=i)
-                red_B = weights[i] - w
+                # Option B: add i to j which later translates to (control=i, target=j)
+                red_B = weights[j] - w
                 bad_B = (states is not None and states[j] == 0 and states[i] == 1)
-                for (red, bad, candidate) in [(red_A, bad_A, (i,j)), (red_B, bad_B, (j,i))]:
+                for (red, bad, candidate) in [(red_A, bad_A, (j,i)), (red_B, bad_B, (i,j))]:
                     if red > reduction:
                         best = candidate
                         reduction = red
@@ -242,7 +244,7 @@ def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int
                         best_safe = candidate
                         best_safe_reduction = red
 
-        if states is not None and best_is_bad and best_safe != (-1,-1) and best_safe_reduction >= reduction - threshold:
+        if states is not None and best_is_bad and best_safe != (-1,-1) and best_safe_reduction > reduction - threshold:
             chosen = best_safe
             chosen_reduction = best_safe_reduction
         else:
