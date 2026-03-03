@@ -510,7 +510,6 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
             if current_states is not None:
                 # Assuming H toggles the state (Up (1) <-> Down (0))
                 current_states[qubit_map[v]] = 1 - current_states[qubit_map[v]]
-                print(f"Qubit {q} flipped to {current_states[q]}")
         if phases[v]:
             c.add_gate("ZPhase", q, phases[v])
             g.set_phase(v, 0)
@@ -660,8 +659,6 @@ def extract_circuit(
         if len(initial_states) != len(outputs):
             raise ValueError("initial_states length must match number of outputs")
         current_states = list(initial_states)
-        if not quiet: print(f"State map provided: Disabling greedy optimization to enforce Safe CNOTs.\n{current_states}")
-        optimize_cnots = 1 # Force usage of matrix approach (gauss)
     
     while True:
         # preprocessing
