@@ -633,7 +633,8 @@ def extract_circuit(
         optimize_cnots: int = 2,
         up_to_perm: bool = False,
         quiet: bool = True,
-        initial_states: Optional[List[int]] = None # List of size n_outputs
+        initial_states: Optional[List[int]] = None, # List of size n_outputs
+        threshold: int = 0,
         ) -> Circuit:
     """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`, 
     it extracts its equivalent set of gates into an instance of :class:`~pyzx.circuit.Circuit`.
@@ -646,6 +647,8 @@ def extract_circuit(
         optimize_cnots: (0,1,2,3) Level of CNOT optimization to apply.
         up_to_perm: If true, returns a circuit that is equivalent to the given graph up to a permutation of the inputs.
         quiet: Whether to print detailed output of the extraction process.
+        initial_states: If provided, describes the initial states of the 3D color code for each logical qubit. 0 -> downward, 1 -> upward (regular)
+        threshold: When optimizing CNOTs, accept a safe CNOT even if it reduces up to `threshold` fewer 1s than the best available reduction. Only has effect when `initial_states` is provided and the best candidate is a bad CNOT.
 
     Warning:
         Note that this function changes the graph ``g`` in place. 
@@ -706,7 +709,7 @@ def extract_circuit(
         m = bi_adj(g, neighbors, frontier)
         if all(sum(row) != 1 for row in m.data):  # No easy vertex
             if optimize_cnots > 1:
-                greedy_operations = greedy_reduction(m, states=current_states, threshold=0)
+                greedy_operations = greedy_reduction(m, states=current_states, threshold=threshold)
             else:
                 greedy_operations = None
 
