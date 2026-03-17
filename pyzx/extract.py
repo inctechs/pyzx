@@ -1606,6 +1606,54 @@ def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool
         print(f"Total CNOTs: {bad + safe}, Bad: {bad}, Safe: {safe}")
         for d in details:
             print(d)
-    else:
-        print(f"Total CNOTs: {bad + safe}, Bad: {bad}, Safe: {safe}")
     return {'bad': bad, 'safe': safe, 'total': bad + safe}
+
+def count_cz_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, any]:
+    """Count bad CZ gates in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state.
+    All other gates are ignored.
+
+    A CZ is 'bad' (non-FT) when both participating qubits are in the |0> state.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts and a 'details' list
+        with one entry per CZ containing gate index, qubit indices,
+        their states at that point, and whether it was bad.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1
+        elif name == 'CZ':
+            q1, q2 = gate.control, gate.target
+            is_bad = (states[q1] == 0 and states[q2] == 0)
+            details.append({
+                'gate_index': idx,
+                'qubit1':     q1,
+                'qubit2':     q2,
+                'q1_state':   states[q1],
+                'q2_state':   states[q2],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+
+    details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total CZs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
+
