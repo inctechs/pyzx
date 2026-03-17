@@ -256,7 +256,6 @@ def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int
         rows[target] = xor_rows(rows[control], rows[target])
         weights[target] = weights[target] - chosen_reduction
         indices.remove(control)
-        print(f"Greedy reduction places CNOTs: {result}\nWith reduction: {chosen_reduction}")
     return result
 
 def flat_indices(m: Mat2, indices: List[int]) -> Tuple[List[Tuple[int, int]], int]:
