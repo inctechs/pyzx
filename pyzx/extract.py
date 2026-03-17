@@ -751,7 +751,7 @@ def extract_circuit(
             if not quiet: print("Simple vertex")
             cnots = []
 
-        extracted = apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors)
+        extracted = apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors, current_state=current_states)
         if not quiet: print("Vertices extracted:", extracted)
             
     if optimize_czs:
