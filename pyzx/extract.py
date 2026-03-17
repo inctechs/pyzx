@@ -719,7 +719,10 @@ def extract_circuit(
                     print("Found greedy reduction with", len(greedy), "CNOT")
                 cnots = greedy
 
+            gaussian_fallback_count = 0
+
             if greedy_operations is None or (optimize_cnots == 3 and len(greedy) > 1):
+                gaussian_fallback_count += 1
                 perm = column_optimal_swap(m)
                 perm = {v: k for k, v in perm.items()}
                 neighbors2 = [neighbors[perm[i]] for i in range(len(neighbors))]
@@ -757,6 +760,7 @@ def extract_circuit(
     id_simp(g)  # Now the graph should only contain inputs and outputs
     # Since we were extracting from right to left, we reverse the order of the gates
     c.gates = list(reversed(c.gates))
+    print("Number of times Gaussian elimination was used:", gaussian_fallback_count)
     return graph_to_swaps(g, up_to_perm) + c
 
 
