@@ -781,7 +781,7 @@ def extract_circuit(
     id_simp(g)  # Now the graph should only contain inputs and outputs
     # Since we were extracting from right to left, we reverse the order of the gates
     c.gates = list(reversed(c.gates))
-    print("Number of times Gaussian elimination was used:", gaussian_fallback_count)
+    # print("Number of times Gaussian elimination was used:", gaussian_fallback_count)
     return graph_to_swaps(g, up_to_perm) + c
 
 
