@@ -244,7 +244,7 @@ def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int
                         best_safe = candidate
                         best_safe_reduction = red
 
-        if states is not None and best_is_bad and best_safe != (-1,-1) and best_safe_reduction > reduction - threshold:
+        if states is not None and best_is_bad and best_safe != (-1,-1) and best_safe_reduction >= reduction - threshold:
             chosen = best_safe
             chosen_reduction = best_safe_reduction
         else:
