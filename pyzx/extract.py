@@ -479,7 +479,7 @@ def remove_extra_cnots(cnots_to_apply: List[CNOT], mat: Mat2) -> List[CNOT]:
 
 
 def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map: Dict[VT, int],
-                cnots: List[CNOT], m: Mat2, neighbors: List[VT]) -> int:
+                cnots: List[CNOT], m: Mat2, neighbors: List[VT], current_state: Optional[List[int]] = None) -> int:
     """Adds the list of CNOTs to the circuit, modifying the graph, frontier, and qubit map as needed.
     Returns the number of vertices that end up being extracted"""
     if len(cnots) > 0:
@@ -514,6 +514,8 @@ def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map:
         c.add_gate(cnot)
     for h in hads:
         c.add_gate("HAD", h)
+        if current_states is not None:
+            current_states[h] = 1 - current_states[h]
 
     return len(good_verts)
 
