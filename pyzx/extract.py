@@ -15,7 +15,7 @@
 # limitations under the License.
 
 __all__ = ['extract_circuit', 'extract_simple', 'graph_to_swaps', 'extract_clifford_normal_form',
-           'lookahead_extract_base', 'lookahead_full', 'lookahead_fast', 'lookahead_extract']
+           'lookahead_extract_base', 'lookahead_full', 'lookahead_fast', 'lookahead_extract', 'multi_restart_extract']
 
 from fractions import Fraction
 from typing_extensions import deprecated
@@ -26,6 +26,7 @@ from .simplify import id_simp, full_reduce, is_graph_like, pivot_simp
 from .rewrite_rules import *
 from .circuit import Circuit
 from .circuit.gates import CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP
+import random
 
 from .graph.base import BaseGraph, VT, ET
 
@@ -763,6 +764,106 @@ def extract_circuit(
     # print("Number of times Gaussian elimination was used:", gaussian_fallback_count)
     return graph_to_swaps(g, up_to_perm) + c
 
+def multi_restart_extract(
+        g: BaseGraph[VT, ET],
+        initial_states: List[int],
+        n_restarts: int = 20,
+        threshold: int = 0,
+        optimize_czs: bool = True,
+        optimize_cnots: int = 2,
+        up_to_perm: bool = False,
+        quiet: bool = True,
+        seed: Optional[int] = None,
+        w_cnot: float = 1.0,
+        w_cz: float = 1.0,
+) -> Tuple[Circuit, Dict[str, any]]:
+    """Run extract_circuit multiple times with randomized tie-breaking,
+    keeping the result with the lowest weighted bad-gate cost.
+
+    The first run (index 0) is always deterministic (rng=None) to ensure
+    the baseline behavior is included in the comparison.
+
+    Args:
+        g: The ZX-diagram graph (will be cloned for each restart).
+        initial_states: R/R' assignment for each qubit (0=R', 1=R).
+        n_restarts: Total number of extraction attempts.
+        threshold: Passed to greedy_reduction — how much reduction to sacrifice for a safe CNOT.
+        optimize_czs: Passed to extract_circuit.
+        optimize_cnots: Passed to extract_circuit.
+        up_to_perm: Passed to extract_circuit.
+        quiet: Passed to extract_circuit.
+        seed: Random seed for reproducibility.
+        w_cnot: Weight for bad CNOTs in the cost function.
+        w_cz: Weight for bad CZs in the cost function.
+
+    Returns:
+        (best_circuit, stats) where stats contains cost details and per-restart info.
+    """
+    master_rng = random.Random(seed)
+    
+    best_circuit = None
+    best_cost = float('inf')
+    run_stats = []
+
+    for trial in range(n_restarts):
+        g_copy = g.clone()
+        
+        # Trial 0 is deterministic (original behavior) to guarantee 
+        # the baseline is always included
+        if trial == 0:
+            # Trial 0: VANILLA PyZX extraction (no flavor awareness at all)
+            # This guarantees the result is at least as good as baseline.
+            trial_rng = None
+            trial_states = None        # ← KEY CHANGE: no states
+            trial_threshold = 0
+        elif trial == 1:
+            # Trial 1: deterministic flavor-aware extraction
+            trial_rng = None
+            trial_states = list(initial_states)
+            trial_threshold = threshold
+        else:
+            # Trials 2+: randomized flavor-aware extraction
+            trial_rng = random.Random(master_rng.randint(0, 2**32 - 1))
+            trial_states = list(initial_states)
+            trial_threshold = threshold
+        
+        circuit = extract_circuit(
+            g_copy,
+            optimize_czs=optimize_czs,
+            optimize_cnots=optimize_cnots,
+            up_to_perm=up_to_perm,
+            quiet=quiet,
+            initial_states=trial_states,  # fresh copy each time
+            threshold=trial_threshold,
+            rng=trial_rng,
+        )
+        
+        circuit_basic = circuit.to_basic_gates()
+        cnot_faults = count_cnot_faults(circuit_basic, list(initial_states))
+        cz_faults = count_cz_faults(circuit_basic, list(initial_states))
+        cost = w_cnot * cnot_faults['bad'] + w_cz * cz_faults['bad']
+        
+        run_stats.append({
+            'trial': trial,
+            'bad_cnots': cnot_faults['bad'],
+            'total_cnots': cnot_faults['total'],
+            'bad_czs': cz_faults['bad'],
+            'total_czs': cz_faults['total'],
+            'cost': cost,
+        })
+        
+        if cost < best_cost:
+            best_cost = cost
+            best_circuit = circuit
+    
+    stats = {
+        'best_cost': best_cost,
+        'n_restarts': n_restarts,
+        'threshold': threshold,
+        'runs': run_stats,
+    }
+    
+    return best_circuit, stats
 
 def extract_simple(g: BaseGraph[VT, ET], up_to_perm: bool = True) -> Circuit:
     """A simplified circuit extractor that works on graphs with a causal flow (e.g. graphs arising
