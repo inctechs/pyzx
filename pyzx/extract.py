@@ -721,7 +721,11 @@ def extract_circuit(
         m = bi_adj(g, neighbors, frontier)
         if all(sum(row) != 1 for row in m.data):  # No easy vertex
             if optimize_cnots > 1:
-                greedy_operations = greedy_reduction(m, states=current_states, threshold=threshold)
+                if current_states is not None:
+                    frontier_states = [current_states[qubit_map[v]] for v in frontier]
+                else:
+                    frontier_states = None
+                greedy_operations = greedy_reduction(m, states=frontier_states, threshold=threshold, rng=rng)
             else:
                 greedy_operations = None
 
