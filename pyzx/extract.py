@@ -200,7 +200,7 @@ def find_minimal_sums(m: Mat2, reversed_search=False) -> Optional[Tuple[int, ...
         combs = combs2
 
 
-def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int = 0) -> Optional[List[Tuple[int, int]]]:
+def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int = 0, rng: Optional[random.Random] = None) -> Optional[List[Tuple[int, int]]]:
     """Returns a list of tuples (r1,r2) that specify which row should be added to which other row
     in order to reduce one row of m to only contain a single 1.
     Used in :func:`extract_circuit` and :func:`lookahead_extract_base`.
@@ -208,7 +208,9 @@ def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int
     If states is provided, prefers fault-tolerant CNOTs (avoids control=|0>, target=|1>).
     threshold: accept a safe CNOT even if it reduces up to `threshold` fewer 1s than
     the best available reduction. Only has effect when states is provided and the best
-    candidate is a bad CNOT."""
+    candidate is a bad CNOT.
+    rng: if provided, randomly selects among safe candidates within the threshold
+    instead of always picking the best one. Used for multi-restart optimization."""
     indicest = find_minimal_sums(m)
     if indicest is None: return indicest
     indices = list(indicest)
@@ -220,7 +222,7 @@ def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int
         best_is_bad = True
         reduction = -10000
         best_safe = (-1, -1)
-        best_safe_reduction = -10000
+        safe_candidates: List[Tuple[Tuple[int, int], int]] = []  # [(candidate, reduction), ...]
         for i in indices:
             for j in indices:
                 if j <= i: continue
@@ -241,13 +243,21 @@ def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int
                     elif red == reduction and best_is_bad and not bad:
                         best = candidate
                         best_is_bad = False
-                    if not bad and red > best_safe_reduction:
-                        best_safe = candidate
-                        best_safe_reduction = red
+                    if not bad:
+                        safe_candidates.append((candidate, red))
 
-        if states is not None and best_is_bad and best_safe != (-1,-1) and best_safe_reduction >= reduction - threshold:
-            chosen = best_safe
-            chosen_reduction = best_safe_reduction
+        if states is not None and best_is_bad and safe_candidates:
+            # Filter to candidates within threshold of the best reduction
+            viable = [(c, r) for c, r in safe_candidates if r >= reduction - threshold]
+            if viable:
+                if rng is not None and len(viable) > 1:
+                    chosen, chosen_reduction = rng.choice(viable)
+                else:
+                    # Deterministic: pick the one with highest reduction (original behavior)
+                    chosen, chosen_reduction = max(viable, key=lambda x: x[1])
+            else:
+                chosen = best
+                chosen_reduction = reduction
         else:
             chosen = best
             chosen_reduction = reduction
@@ -636,6 +646,7 @@ def extract_circuit(
         quiet: bool = True,
         initial_states: Optional[List[int]] = None, # List of size n_outputs
         threshold: int = 0,
+        rng: Optional[random.Random] = None,
         ) -> Circuit:
     """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`, 
     it extracts its equivalent set of gates into an instance of :class:`~pyzx.circuit.Circuit`.
