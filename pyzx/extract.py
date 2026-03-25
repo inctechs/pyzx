@@ -564,17 +564,74 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
 
     if optimize_czs:
         overlap_data = max_overlap(cz_mat)
-        while len(overlap_data[1]) > 2:  # there are enough common qubits to be worth optimizing
+        while len(overlap_data[1]) > 2:
             i, j = overlap_data[0][0], overlap_data[0][1]
-            czs_saved += len(overlap_data[1]) - 2
-            c.add_gate("CNOT", i, j)
-            for qb in overlap_data[1]:
-                c.add_gate("CZ", j, qb)
-                cz_mat.data[i][qb] = 0
-                cz_mat.data[j][qb] = 0
-                cz_mat.data[qb][i] = 0
-                cz_mat.data[qb][j] = 0
-            c.add_gate("CNOT", i, j)
+            common = overlap_data[1]
+
+            if current_states is not None:
+                # ── Flavor-aware conjugation decision ──
+                #
+                # The rewrite replaces CZ(i,k)+CZ(j,k) for each shared k
+                # with CNOT(ctrl,tgt) + CZ(keeper,k) + CNOT(ctrl,tgt).
+                #
+                # Direction A: i is absorbed, j keeps CZs, CNOT(i→j)
+                #   improvement = (bad CZs eliminated on row i) − 2×(CNOT(i,j) is bad)
+                #
+                # Direction B: j is absorbed, i keeps CZs, CNOT(j→i)
+                #   improvement = (bad CZs eliminated on row j) − 2×(CNOT(j,i) is bad)
+
+                # Count bad CZs on each row among the shared targets
+                # Bad CZ: both qubits in state 0 (R')
+                si, sj = current_states[i], current_states[j]
+                bad_czs_i = sum(1 for k in common if si == 0 and current_states[k] == 0)
+                bad_czs_j = sum(1 for k in common if sj == 0 and current_states[k] == 0)
+
+                # Bad CNOT: control=0(R'), target=1(R)
+                bad_cnot_ij = 1 if (si == 0 and sj == 1) else 0  # CNOT(i→j)
+                bad_cnot_ji = 1 if (sj == 0 and si == 1) else 0  # CNOT(j→i)
+
+                improvement_a = bad_czs_i - 2 * bad_cnot_ij
+                improvement_b = bad_czs_j - 2 * bad_cnot_ji
+
+                if improvement_a >= improvement_b:
+                    best_improvement = improvement_a
+                    # j keeps CZs, CNOT control=i target=j
+                    keeper, absorbed = j, i
+                else:
+                    best_improvement = improvement_b
+                    # i keeps CZs, CNOT control=j target=i
+                    keeper, absorbed = i, j
+
+                if best_improvement < 0:
+                    # Conjugation worsens bad-gate count — skip entirely.
+                    # max_overlap always returns the same best pair, so
+                    # no other pair can do better (fewer shared targets
+                    # means less CZ savings against the same 2-CNOT cost).
+                    break
+
+                # Apply conjugation in the chosen direction
+                czs_saved += len(common) - 2
+                c.add_gate("CNOT", absorbed, keeper)
+                for qb in common:
+                    c.add_gate("CZ", keeper, qb)
+                    cz_mat.data[i][qb] = 0
+                    cz_mat.data[j][qb] = 0
+                    cz_mat.data[qb][i] = 0
+                    cz_mat.data[qb][j] = 0
+                c.add_gate("CNOT", absorbed, keeper)
+
+            else:
+                # ── Original behavior (no flavor awareness) ──
+                czs_saved += len(common) - 2
+                c.add_gate("CNOT", i, j)
+                for qb in common:
+                    c.add_gate("CZ", j, qb)
+                    cz_mat.data[i][qb] = 0
+                    cz_mat.data[j][qb] = 0
+                    cz_mat.data[qb][i] = 0
+                    cz_mat.data[qb][j] = 0
+                c.add_gate("CNOT", i, j)
+
             overlap_data = max_overlap(cz_mat)
 
     for i in range(len(outputs)):
