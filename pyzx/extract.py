@@ -840,6 +840,110 @@ def _has_bad_ops(
             return True
     return False
 
+def _simulate_forward(
+    snapshot: ExtractionSnapshot,
+    initial_ops: List[Tuple[int, int]],
+    m_original: Mat2,
+    neighbors_original: List,
+    n_rounds: int,
+    optimize_czs: bool,
+    threshold: int,
+    w_cnot: float,
+    w_cz: float,
+) -> float:
+    """Simulate extraction forward from a snapshot, return cumulative bad-gate cost.
+ 
+    Parameters
+    ----------
+    snapshot : ExtractionSnapshot
+        State at the decision point.  Will be cloned internally.
+    initial_ops : list of (int, int)
+        greedy_reduction output to apply as the initial CNOT choice.
+    m_original : Mat2
+        Biadjacency matrix at the decision point.  Not modified.
+    neighbors_original : list
+        Neighbor vertices at the decision point.  Not modified.
+    n_rounds : int
+        Number of ADDITIONAL extraction rounds to simulate after applying
+        the initial choice (so total simulated rounds = 1 + n_rounds).
+    optimize_czs : bool
+        Passed to clean_frontier.
+    threshold : int
+        Threshold for greedy_reduction during simulation rounds.
+    w_cnot, w_cz : float
+        Weights for the cost function.
+ 
+    Returns
+    -------
+    float
+        Cumulative weighted bad-gate cost over the simulated rounds.
+    """
+    snap = snapshot.clone()
+    g = snap.graph
+    c = snap.circuit
+    frontier = snap.frontier
+    qubit_map = snap.qubit_map
+    gadgets = snap.gadgets
+    current_states = snap.current_states
+ 
+    cost_acc = CostAccumulator(w_cnot, w_cz)
+ 
+    # ── Round 0: apply the initial CNOT choice ──
+    # Copy m and neighbors (apply_cnots modifies m via row_add,
+    # and we must not touch the caller's originals)
+    m = Mat2([row[:] for row in m_original.data])
+    neighbors = list(neighbors_original)
+    cnots = [CNOT(target, control) for control, target in initial_ops]
+    apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors,
+                current_states=current_states, cost_acc=cost_acc)
+ 
+    # ── Rounds 1..n_rounds: continue extraction with greedy defaults ──
+    for _round in range(n_rounds):
+        clean_frontier(g, c, frontier, qubit_map, optimize_czs,
+                       current_states, cost_acc=cost_acc)
+ 
+        neighbor_set = neighbors_of_frontier(g, frontier)
+        if not frontier:
+            break
+ 
+        if remove_gadget(g, frontier, qubit_map, neighbor_set, gadgets):
+            # Gadget removed — this doesn't cost anything, but we consumed
+            # a loop iteration.  That's fine: the next iteration will
+            # process the actual extraction round.
+            continue
+ 
+        neighbors = list(neighbor_set)
+        m = bi_adj(g, neighbors, frontier)
+ 
+        if any(sum(row) == 1 for row in m.data):
+            # Easy vertex — no CNOTs needed
+            apply_cnots(g, c, frontier, qubit_map, [], m, neighbors,
+                        current_states=current_states, cost_acc=cost_acc)
+            continue
+ 
+        # Greedy reduction with flavor awareness, no randomization
+        frontier_states = [current_states[qubit_map[v]] for v in frontier]
+        ops = greedy_reduction(
+            m, states=frontier_states, threshold=threshold, rng=None,
+        )
+ 
+        if ops is not None:
+            cnots = [CNOT(target, control) for control, target in ops]
+        else:
+            # Gaussian fallback (extremely rare but handle for safety)
+            perm = column_optimal_swap(m)
+            perm = {v: k for k, v in perm.items()}
+            neighbors2 = [neighbors[perm[i]] for i in range(len(neighbors))]
+            m = bi_adj(g, neighbors2, frontier)
+            cnots = m.to_cnots(optimize=True)
+            cnots = filter_duplicate_cnots(cnots)
+            neighbors = neighbors2
+ 
+        apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors,
+                    current_states=current_states, cost_acc=cost_acc)
+ 
+    return cost_acc.cost
+
 def extract_circuit(
         g: BaseGraph[VT, ET],
         optimize_czs: bool = True,
