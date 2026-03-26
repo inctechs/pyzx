@@ -829,6 +829,17 @@ def _generate_cnot_alternatives(
  
     return [ops for ops, _bad in by_extraction.values()]
 
+def _has_bad_ops(
+    ops: List[Tuple[int, int]],
+    frontier_states: List[int],
+) -> bool:
+    """Check whether any operation in a greedy_reduction result is a bad CNOT."""
+    for c_g, t_g in ops:
+        # Same convention as _generate_cnot_alternatives
+        if frontier_states[t_g] == 0 and frontier_states[c_g] == 1:
+            return True
+    return False
+
 def extract_circuit(
         g: BaseGraph[VT, ET],
         optimize_czs: bool = True,
