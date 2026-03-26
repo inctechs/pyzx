@@ -533,8 +533,9 @@ def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map:
 
 
 def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
-                   qubit_map: Dict[VT, int], optimize_czs: bool = True,
-                   current_states: Optional[List[int]] = None) -> int:
+                       qubit_map: Dict[VT, int], optimize_czs: bool = True,
+                       current_states: Optional[List[int]] = None,
+                       cost_acc: Optional[CostAccumulator] = None) -> int:
     """Remove single qubit gates from the frontier and any CZs between the vertices in the frontier
     Returns the number of CZs saved if `optimize_czs` is True; otherwise returns 0"""
     phases = g.phases()
@@ -613,25 +614,37 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
                 # Apply conjugation in the chosen direction
                 czs_saved += len(common) - 2
                 c.add_gate("CNOT", absorbed, keeper)
+                if cost_acc is not None:
+                    cost_acc.record_cnot(current_states[absorbed], current_states[keeper])
                 for qb in common:
                     c.add_gate("CZ", keeper, qb)
+                    if cost_acc is not None:
+                        cost_acc.record_cz(current_states[keeper], current_states[qb])
                     cz_mat.data[i][qb] = 0
                     cz_mat.data[j][qb] = 0
                     cz_mat.data[qb][i] = 0
                     cz_mat.data[qb][j] = 0
                 c.add_gate("CNOT", absorbed, keeper)
+                if cost_acc is not None:
+                    cost_acc.record_cnot(current_states[absorbed], current_states[keeper])
 
             else:
                 # ── Original behavior (no flavor awareness) ──
                 czs_saved += len(common) - 2
                 c.add_gate("CNOT", i, j)
+                if cost_acc is not None and current_states is not None:
+                    cost_acc.record_cnot(current_states[i], current_states[j])
                 for qb in common:
                     c.add_gate("CZ", j, qb)
+                    if cost_acc is not None and current_states is not None:
+                        cost_acc.record_cz(current_states[j], current_states[qb])
                     cz_mat.data[i][qb] = 0
                     cz_mat.data[j][qb] = 0
                     cz_mat.data[qb][i] = 0
                     cz_mat.data[qb][j] = 0
                 c.add_gate("CNOT", i, j)
+                if cost_acc is not None and current_states is not None:
+                    cost_acc.record_cnot(current_states[i], current_states[j])
 
             overlap_data = max_overlap(cz_mat)
 
@@ -639,6 +652,8 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
         for j in range(i + 1, len(outputs)):
             if cz_mat.data[i][j] == 1:
                 c.add_gate("CZ", i, j)
+                if cost_acc is not None and current_states is not None:
+                    cost_acc.record_cz(current_states[i], current_states[j])
 
     return czs_saved
 
