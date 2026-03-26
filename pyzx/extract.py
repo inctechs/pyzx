@@ -1241,6 +1241,8 @@ def multi_restart_extract(
         seed: Optional[int] = None,
         w_cnot: float = 1.0,
         w_cz: float = 1.0,
+        lookahead_depth: int = 0,
+        lookahead_thresholds: Optional[List[int]] = None,
 ) -> Tuple[Circuit, Dict[str, any]]:
     """Run extract_circuit multiple times with randomized tie-breaking,
     keeping the result with the lowest weighted bad-gate cost.
@@ -1298,10 +1300,15 @@ def multi_restart_extract(
             optimize_cnots=optimize_cnots,
             up_to_perm=up_to_perm,
             quiet=quiet,
-            initial_states=trial_states,  # fresh copy each time
+            initial_states=trial_states,
             threshold=trial_threshold,
             rng=trial_rng,
+            lookahead_depth=lookahead_depth,
+            lookahead_thresholds=lookahead_thresholds,
+            w_cnot=w_cnot,
+            w_cz=w_cz,
         )
+
         
         circuit_basic = circuit.to_basic_gates()
         cnot_faults = count_cnot_faults(circuit_basic, list(initial_states))
@@ -1325,6 +1332,8 @@ def multi_restart_extract(
         'best_cost': best_cost,
         'n_restarts': n_restarts,
         'threshold': threshold,
+        'lookahead_depth': lookahead_depth,
+        'lookahead_thresholds': lookahead_thresholds,
         'runs': run_stats,
     }
     
