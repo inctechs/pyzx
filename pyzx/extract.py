@@ -1054,9 +1054,13 @@ def extract_circuit(
         optimize_cnots: int = 2,
         up_to_perm: bool = False,
         quiet: bool = True,
-        initial_states: Optional[List[int]] = None, # List of size n_outputs
+        initial_states: Optional[List[int]] = None,
         threshold: int = 0,
         rng: Optional[random.Random] = None,
+        lookahead_depth: int = 0,
+        lookahead_thresholds: Optional[List[int]] = None,
+        w_cnot: float = 1.0,
+        w_cz: float = 1.0,
         ) -> Circuit:
     """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`,
     it extracts its equivalent set of gates into an instance of :class:`~pyzx.circuit.Circuit`.
@@ -1076,6 +1080,10 @@ def extract_circuit(
         quiet: Whether to print detailed output of the extraction process.
         initial_states: If provided, describes the initial states of the 3D color code for each logical qubit. 0 -> downward, 1 -> upward (regular)
         threshold: When optimizing CNOTs, accept a safe CNOT even if it reduces up to `threshold` fewer 1s than the best available reduction. Only has effect when `initial_states` is provided and the best candidate is a bad CNOT.
+        lookahead_depth=0     → lookahead disabled (existing behavior)
+        lookahead_depth=2     → simulate 2 additional rounds after each alternative
+        lookahead_thresholds  → which thresholds to test [default: [0, 1, 2]]
+        w_cnot, w_cz          → cost weights (same semantics as multi_restart_extract)
 
     Raises:
         ValueError: If the graph contains ground vertices or has differing
@@ -1157,9 +1165,20 @@ def extract_circuit(
                 else:
                     frontier_states = None
                 greedy_operations = greedy_reduction(m, states=frontier_states, threshold=threshold, rng=rng)
+ 
+                # ── Bounded lookahead: evaluate alternative CNOT sets ──
+                if (lookahead_depth > 0 and greedy_operations is not None
+                        and current_states is not None and frontier_states is not None):
+                    greedy_operations = _evaluate_lookahead(
+                        g, c, frontier, qubit_map, gadgets, current_states,
+                        m, neighbors, greedy_operations, frontier_states,
+                        lookahead_depth,
+                        lookahead_thresholds if lookahead_thresholds is not None else [0, 1, 2],
+                        optimize_czs, threshold, w_cnot, w_cz,
+                    )
             else:
                 greedy_operations = None
-
+ 
             if greedy_operations is not None:
                 greedy = [CNOT(target, control) for control, target in greedy_operations]
                 if (len(greedy) == 1 or optimize_cnots < 3) and not quiet:
