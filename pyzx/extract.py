@@ -30,7 +30,7 @@ import random
 
 from .graph.base import BaseGraph, VT, ET
 
-from typing import List, Optional, Tuple, Dict, Set, Union
+from typing import List, Optional, Tuple, Dict, Set, Union, FrozenSet
 from dataclasses import dataclass
 
 
@@ -759,6 +759,75 @@ class ExtractionSnapshot:
             gadgets=dict(self.gadgets),
             current_states=list(self.current_states),
         )
+
+def _generate_cnot_alternatives(
+    m: Mat2,
+    frontier_states: Optional[List[int]],
+    threshold_range: List[int],
+) -> List[List[Tuple[int, int]]]:
+    """Generate deduplicated CNOT operation alternatives for lookahead evaluation.
+ 
+    Returns a list of greedy_reduction operation lists (row-index pairs),
+    deduplicated by extractable-row-set.  For alternatives sharing the
+    same extractable rows, keeps the one with fewest bad CNOTs.
+ 
+    Parameters
+    ----------
+    m : Mat2
+        Biadjacency matrix at the decision point.  NOT modified.
+    frontier_states : list of int or None
+        Flavor state per frontier row (0=R', 1=R).
+    threshold_range : list of int
+        Thresholds to test (e.g., [0, 1, 2]).
+ 
+    Returns
+    -------
+    list of list of (int, int)
+        Each inner list is a greedy_reduction output: [(control, target), ...].
+    """
+    # Build candidate configurations
+    configs: List[Tuple[str, Optional[List[int]], int]] = [
+        ("vanilla", None, 0),
+    ]
+    if frontier_states is not None:
+        for t in threshold_range:
+            configs.append((f"t{t}", list(frontier_states), t))
+ 
+    # Group by extractable rows → keep best per group
+    by_extraction: Dict[FrozenSet[int], Tuple[List[Tuple[int, int]], int]] = {}
+ 
+    for _label, states_arg, thresh in configs:
+        # Fresh matrix copy — greedy_reduction's internal rows dict doesn't
+        # modify m.data, but we're being defensive across multiple calls
+        m_copy = Mat2([row[:] for row in m.data])
+        ops = greedy_reduction(m_copy, states=states_arg, threshold=thresh)
+        if ops is None:
+            continue
+ 
+        # Apply ops to a fresh copy to find extractable rows
+        m_after = Mat2([row[:] for row in m.data])
+        for ctrl, tgt in ops:
+            m_after.data[tgt] = xor_rows(m_after.data[ctrl], m_after.data[tgt])
+        ext_rows = frozenset(
+            i for i, row in enumerate(m_after.data) if sum(row) == 1
+        )
+ 
+        # Count bad CNOTs for this alternative
+        bad = 0
+        if frontier_states is not None:
+            for c_g, t_g in ops:
+                # Convention: greedy returns (control_row, target_row).
+                # Circuit CNOT will be CNOT(control=target_row, target=control_row).
+                # Bad when circuit control=R'(0) and circuit target=R(1),
+                # i.e., frontier_states[t_g]==0 and frontier_states[c_g]==1.
+                if frontier_states[t_g] == 0 and frontier_states[c_g] == 1:
+                    bad += 1
+ 
+        # Keep best (fewest bad) per extractable-row-set
+        if ext_rows not in by_extraction or bad < by_extraction[ext_rows][1]:
+            by_extraction[ext_rows] = (ops, bad)
+ 
+    return [ops for ops, _bad in by_extraction.values()]
 
 def extract_circuit(
         g: BaseGraph[VT, ET],
