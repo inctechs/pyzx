@@ -944,6 +944,92 @@ def _simulate_forward(
  
     return cost_acc.cost
 
+def _evaluate_lookahead(
+    g: BaseGraph,
+    c: Circuit,
+    frontier: List,
+    qubit_map: Dict,
+    gadgets: Dict,
+    current_states: List[int],
+    m: Mat2,
+    neighbors: List,
+    default_ops: List[Tuple[int, int]],
+    frontier_states: List[int],
+    lookahead_depth: int,
+    lookahead_thresholds: List[int],
+    optimize_czs: bool,
+    threshold: int,
+    w_cnot: float,
+    w_cz: float,
+) -> List[Tuple[int, int]]:
+    """Evaluate CNOT alternatives with forward simulation, return best ops.
+ 
+    Parameters
+    ----------
+    g, c, frontier, qubit_map, gadgets, current_states
+        Current extraction state.  NOT modified (snapshot is taken internally).
+    m : Mat2
+        Current biadjacency matrix.
+    neighbors : list
+        Current neighbor vertices.
+    default_ops : list of (int, int)
+        The greedy_reduction result that would be used without lookahead.
+    frontier_states : list of int
+        Flavor states per frontier row.
+    lookahead_depth : int
+        Number of additional extraction rounds to simulate.
+    lookahead_thresholds : list of int
+        Thresholds to test when generating alternatives.
+    optimize_czs : bool
+        Passed to clean_frontier during simulation.
+    threshold : int
+        Threshold used for greedy decisions during simulation.
+    w_cnot, w_cz : float
+        Weights for the cost function.
+ 
+    Returns
+    -------
+    list of (int, int)
+        Best operation list (greedy_reduction format).
+    """
+    # Gate 1: Only trigger if default has bad CNOTs
+    if not _has_bad_ops(default_ops, frontier_states):
+        return default_ops
+ 
+    # Gate 2: Generate structurally distinct alternatives
+    alternatives = _generate_cnot_alternatives(
+        m, frontier_states, lookahead_thresholds,
+    )
+ 
+    # Gate 3: If only one distinct alternative, no simulation needed
+    if len(alternatives) <= 1:
+        # Return the single alternative (which may be better than default_ops
+        # if deduplication picked a lower-bad-count variant)
+        return alternatives[0] if alternatives else default_ops
+ 
+    # Gate 4: Simulate each alternative
+    snapshot = ExtractionSnapshot.capture(
+        g, c, frontier, qubit_map, gadgets, current_states,
+    )
+ 
+    best_ops = default_ops
+    best_cost = float('inf')
+ 
+    for alt_ops in alternatives:
+        cost = _simulate_forward(
+            snapshot, alt_ops, m, neighbors,
+            n_rounds=lookahead_depth,
+            optimize_czs=optimize_czs,
+            threshold=threshold,
+            w_cnot=w_cnot,
+            w_cz=w_cz,
+        )
+        if cost < best_cost:
+            best_cost = cost
+            best_ops = alt_ops
+ 
+    return best_ops
+
 def extract_circuit(
         g: BaseGraph[VT, ET],
         optimize_czs: bool = True,
