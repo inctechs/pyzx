@@ -694,6 +694,33 @@ def remove_gadget(g: BaseGraph[VT, ET], frontier: List[VT], qubit_map: Dict[VT, 
                 break
     return removed_gadget
 
+class CostAccumulator:
+    """Mutable counter for bad gates during extraction simulation.
+ 
+    Passed into clean_frontier and apply_cnots via an optional parameter.
+    When None is passed instead, those functions behave identically to before.
+    """
+    __slots__ = ('w_cnot', 'w_cz', 'bad_cnots', 'bad_czs')
+ 
+    def __init__(self, w_cnot: float = 1.0, w_cz: float = 1.0) -> None:
+        self.w_cnot = w_cnot
+        self.w_cz = w_cz
+        self.bad_cnots = 0
+        self.bad_czs = 0
+ 
+    def record_cnot(self, control_state: int, target_state: int) -> None:
+        """Record a CNOT gate.  Bad when control=R'(0), target=R(1)."""
+        if control_state == 0 and target_state == 1:
+            self.bad_cnots += 1
+ 
+    def record_cz(self, state_a: int, state_b: int) -> None:
+        """Record a CZ gate.  Bad when both qubits are R'(0)."""
+        if state_a == 0 and state_b == 0:
+            self.bad_czs += 1
+ 
+    @property
+    def cost(self) -> float:
+        return self.w_cnot * self.bad_cnots + self.w_cz * self.bad_czs
 
 def extract_circuit(
         g: BaseGraph[VT, ET],
