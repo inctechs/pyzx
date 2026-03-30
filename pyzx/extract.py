@@ -1182,15 +1182,22 @@ def _evaluate_lookahead(
         # if deduplication picked a lower-bad-count variant)
         return alternatives[0] if alternatives else default_ops
  
-    # Gate 4: Simulate each alternative
+    # Gate 4: Simulate each alternative (including the default)
     snapshot = ExtractionSnapshot.capture(
         g, c, frontier, qubit_map, gadgets, current_states,
     )
- 
+
+    # Include default_ops in the candidate pool to ensure lookahead
+    # can only improve, never worsen, the greedy result.
+    # It may already be covered by one of the deterministic alternatives,
+    # but if rng produced a unique path, this captures it.
+    all_candidates = [default_ops] + [alt for alt in alternatives
+                                       if alt != default_ops]
+
     best_ops = default_ops
     best_cost = float('inf')
- 
-    for alt_ops in alternatives:
+
+    for alt_ops in all_candidates:
         cost = _simulate_forward(
             snapshot, alt_ops, m, neighbors,
             n_rounds=lookahead_depth,
@@ -1333,6 +1340,7 @@ def extract_circuit(
                         lookahead_depth,
                         lookahead_thresholds if lookahead_thresholds is not None else [0, 1, 2],
                         optimize_czs, threshold, w_cnot, w_cz,
+                        n_random=n_lookahead_random,
                     )
             else:
                 greedy_operations = None
