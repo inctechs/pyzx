@@ -1130,6 +1130,8 @@ def _evaluate_lookahead(
     threshold: int,
     w_cnot: float,
     w_cz: float,
+    n_random: int = 0,
+    rng_seed: int = None,
 ) -> List[Tuple[int, int]]:
     """Evaluate CNOT alternatives with forward simulation, return best ops.
  
@@ -1162,13 +1164,17 @@ def _evaluate_lookahead(
         Best operation list (greedy_reduction format).
     """
     # Gate 1: Only trigger if default has bad CNOTs
-    if not _has_bad_ops(default_ops, frontier_states):
-        return default_ops
+    # if not _has_bad_ops(default_ops, frontier_states):
+    #     return default_ops
  
     # Gate 2: Generate structurally distinct alternatives
     alternatives = _generate_cnot_alternatives(
         m, frontier_states, lookahead_thresholds,
+        n_random=n_random,
+        rng_seed=rng_seed,
     )
+    # print(f"  Lookahead: {len(alternatives)} distinct alternatives at this decision point")
+
  
     # Gate 3: If only one distinct alternative, no simulation needed
     if len(alternatives) <= 1:
@@ -1200,20 +1206,21 @@ def _evaluate_lookahead(
     return best_ops
 
 def extract_circuit(
-        g: BaseGraph[VT, ET],
-        optimize_czs: bool = True,
-        optimize_cnots: int = 2,
-        up_to_perm: bool = False,
-        quiet: bool = True,
-        initial_states: Optional[List[int]] = None,
-        threshold: int = 0,
-        rng: Optional[random.Random] = None,
-        lookahead_depth: int = 0,
-        lookahead_thresholds: Optional[List[int]] = None,
-        w_cnot: float = 1.0,
-        w_cz: float = 1.0,
-        ) -> Circuit:
-    """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`,
+    g: BaseGraph[VT, ET],
+    optimize_czs: bool = True,
+    optimize_cnots: int = 2,
+    up_to_perm: bool = False,
+    quiet: bool = True,
+    initial_states: Optional[List[int]] = None,
+    threshold: int = 0,
+    rng: Optional[random.Random] = None,
+    lookahead_depth: int = 0,
+    lookahead_thresholds: Optional[List[int]] = None,
+    w_cnot: float = 1.0,
+    w_cz: float = 1.0,
+    n_lookahead_random: int = 0,
+) -> Circuit:
+    """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`, 
     it extracts its equivalent set of gates into an instance of :class:`~pyzx.circuit.Circuit`.
     This function implements a more optimized version of the algorithm described in
     `There and back again: A circuit extraction tale <https://arxiv.org/abs/2003.01664>`_
@@ -1381,19 +1388,20 @@ def extract_circuit(
     return graph_to_swaps(g, up_to_perm) + c
 
 def multi_restart_extract(
-        g: BaseGraph[VT, ET],
-        initial_states: List[int],
-        n_restarts: int = 20,
-        threshold: int = 0,
-        optimize_czs: bool = True,
-        optimize_cnots: int = 2,
-        up_to_perm: bool = False,
-        quiet: bool = True,
-        seed: Optional[int] = None,
-        w_cnot: float = 1.0,
-        w_cz: float = 1.0,
-        lookahead_depth: int = 0,
-        lookahead_thresholds: Optional[List[int]] = None,
+    g: BaseGraph[VT, ET],
+    initial_states: List[int],
+    n_restarts: int = 20,
+    threshold: int = 0,
+    optimize_czs: bool = True,
+    optimize_cnots: int = 2,
+    up_to_perm: bool = False,
+    quiet: bool = True,
+    seed: Optional[int] = None,
+    w_cnot: float = 1.0,
+    w_cz: float = 1.0,
+    lookahead_depth: int = 0,
+    lookahead_thresholds: Optional[List[int]] = None,
+    n_lookahead_random: int = 0,
 ) -> Tuple[Circuit, Dict[str, any]]:
     """Run extract_circuit multiple times with randomized tie-breaking,
     keeping the result with the lowest weighted bad-gate cost.
@@ -1458,6 +1466,7 @@ def multi_restart_extract(
             lookahead_thresholds=lookahead_thresholds,
             w_cnot=w_cnot,
             w_cz=w_cz,
+            n_lookahead_random=n_lookahead_random,
         )
 
         
