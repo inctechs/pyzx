@@ -778,17 +778,21 @@ def remove_gadget(g: BaseGraph[VT, ET], frontier: List[VT], qubit_map: Dict[VT, 
                 break
     return removed_gadget
 
-
 def _generate_cnot_alternatives(
     m: Mat2,
     frontier_states: Optional[List[int]],
     threshold_range: List[int],
+    n_random: int = 0,
+    rng_seed: Optional[int] = None,
 ) -> List[List[Tuple[int, int]]]:
     """Generate deduplicated CNOT operation alternatives for lookahead evaluation.
  
-    Returns a list of greedy_reduction operation lists (row-index pairs),
-    deduplicated by extractable-row-set.  For alternatives sharing the
-    same extractable rows, keeps the one with fewest bad CNOTs.
+    Uses multiple algorithmic approaches (greedy, flat-greedy, two-reduction)
+    plus randomized variants to maximize the diversity of structurally distinct
+    extraction paths.
+ 
+    Returns a list of greedy_reduction-format operation lists, deduplicated
+    by extractable-row-set.
  
     Parameters
     ----------
@@ -797,33 +801,18 @@ def _generate_cnot_alternatives(
     frontier_states : list of int or None
         Flavor state per frontier row (0=R', 1=R).
     threshold_range : list of int
-        Thresholds to test (e.g., [0, 1, 2]).
- 
-    Returns
-    -------
-    list of list of (int, int)
-        Each inner list is a greedy_reduction output: [(control, target), ...].
+        Thresholds to test for flavor-aware greedy (e.g., [0, 1, 2]).
+    n_random : int
+        Number of randomized greedy_reduction calls per threshold.
+        Total randomized calls = n_random * len(threshold_range).
+    rng_seed : int or None
+        Base seed for reproducibility of randomized alternatives.
     """
-    # Build candidate configurations
-    configs: List[Tuple[str, Optional[List[int]], int]] = [
-        ("vanilla", None, 0),
-    ]
-    if frontier_states is not None:
-        for t in threshold_range:
-            configs.append((f"t{t}", list(frontier_states), t))
+    import random as _random
  
-    # Group by extractable rows → keep best per group
-    by_extraction: Dict[FrozenSet[int], Tuple[List[Tuple[int, int]], int]] = {}
- 
-    for _label, states_arg, thresh in configs:
-        # Fresh matrix copy — greedy_reduction's internal rows dict doesn't
-        # modify m.data, but we're being defensive across multiple calls
-        m_copy = Mat2([row[:] for row in m.data])
-        ops = greedy_reduction(m_copy, states=states_arg, threshold=thresh)
-        if ops is None:
-            continue
- 
-        # Apply ops to a fresh copy to find extractable rows
+    # ── Helper: compute extractable rows and bad-CNOT count for an op list ──
+    def _evaluate_ops(ops):
+        """Returns (extractable_rows frozenset, bad_cnot_count)."""
         m_after = Mat2([row[:] for row in m.data])
         for ctrl, tgt in ops:
             m_after.data[tgt] = xor_rows(m_after.data[ctrl], m_after.data[tgt])
@@ -831,22 +820,183 @@ def _generate_cnot_alternatives(
             i for i, row in enumerate(m_after.data) if sum(row) == 1
         )
  
-        # Count bad CNOTs for this alternative
         bad = 0
         if frontier_states is not None:
             for c_g, t_g in ops:
                 # Convention: greedy returns (control_row, target_row).
-                # Circuit CNOT will be CNOT(control=target_row, target=control_row).
-                # Bad when circuit control=R'(0) and circuit target=R(1),
-                # i.e., frontier_states[t_g]==0 and frontier_states[c_g]==1.
+                # Circuit CNOT: CNOT(control=target_row, target=control_row).
+                # Bad when circuit control=R'(0) and circuit target=R(1).
                 if frontier_states[t_g] == 0 and frontier_states[c_g] == 1:
                     bad += 1
  
-        # Keep best (fewest bad) per extractable-row-set
+        return ext_rows, bad
+ 
+    # Group by extractable rows → keep best (fewest bad) per group.
+    # Same extractable rows = same downstream frontier evolution,
+    # so only the immediate CNOT cost differs → pick lowest cost.
+    by_extraction: Dict[FrozenSet[int], Tuple[List[Tuple[int, int]], int]] = {}
+ 
+    def _record(ops):
+        """Record an alternative, deduplicating by extractable rows."""
+        if ops is None:
+            return
+        ext_rows, bad = _evaluate_ops(ops)
+        if not ext_rows:
+            return  # No extractable rows — invalid
         if ext_rows not in by_extraction or bad < by_extraction[ext_rows][1]:
             by_extraction[ext_rows] = (ops, bad)
  
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 1: Vanilla greedy (no flavor awareness)
+    # Finds: forward-search minimal sum, greedy pairwise ordering
+    # ═══════════════════════════════════════════════════════════════
+    m_copy = Mat2([row[:] for row in m.data])
+    _record(greedy_reduction(m_copy, states=None, threshold=0))
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 2: Flavor-aware greedy at each threshold (deterministic)
+    # Same row subset as vanilla, but different pairwise ordering
+    # when bad CNOTs trigger substitution
+    # ═══════════════════════════════════════════════════════════════
+    if frontier_states is not None:
+        for t in threshold_range:
+            m_copy = Mat2([row[:] for row in m.data])
+            _record(greedy_reduction(m_copy, states=list(frontier_states), threshold=t))
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 3: Flat greedy (REVERSED search direction)
+    # Uses find_minimal_sums(m, reversed_search=True), which searches
+    # row combinations starting from the highest indices.  Often finds
+    # a DIFFERENT row subset than the forward search.
+    # Uses flat_indices for log-depth CNOT ordering.
+    # ═══════════════════════════════════════════════════════════════
+    m_copy = Mat2([row[:] for row in m.data])
+    _record(greedy_reduction_flat(m_copy))
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 4: Two-reduction (simultaneous double extraction)
+    # Uses find_2_minimal_sums which finds two rows that can be
+    # independently reduced to weight 1.  Completely different
+    # algorithmic approach — may extract different vertices.
+    # ═══════════════════════════════════════════════════════════════
+    m_copy = Mat2([row[:] for row in m.data])
+    _record(greedy_two_reduction(m_copy))
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 5: Randomized greedy (flavor-aware + random tie-breaking)
+    # Each RNG seed explores different tie-breaking decisions within
+    # greedy_reduction's inner loop.
+    # ═══════════════════════════════════════════════════════════════
+    if n_random > 0 and frontier_states is not None:
+        base_rng = _random.Random(rng_seed if rng_seed is not None else 12345)
+        for _i in range(n_random):
+            for t in threshold_range:
+                seed_i = base_rng.randint(0, 2**32 - 1)
+                trial_rng = _random.Random(seed_i)
+                m_copy = Mat2([row[:] for row in m.data])
+                _record(greedy_reduction(
+                    m_copy, states=list(frontier_states),
+                    threshold=t, rng=trial_rng,
+                ))
+ 
     return [ops for ops, _bad in by_extraction.values()]
+
+# def _generate_cnot_alternatives(
+#     m: Mat2,
+#     frontier_states: Optional[List[int]],
+#     threshold_range: List[int],
+#     n_random: int = 0,
+#     rng_seed: Optional[int] = None,
+# ) -> List[List[Tuple[int, int]]]:
+#     """Generate deduplicated CNOT operation alternatives for lookahead evaluation.
+#
+#     Returns a list of greedy_reduction operation lists (row-index pairs),
+#     deduplicated by extractable-row-set.  For alternatives sharing the
+#     same extractable rows, keeps the one with fewest bad CNOTs.
+#
+#     Parameters
+#     ----------
+#     m : Mat2
+#         Biadjacency matrix at the decision point.  NOT modified.
+#     frontier_states : list of int or None
+#         Flavor state per frontier row (0=R', 1=R).
+#     threshold_range : list of int
+#         Thresholds to test deterministically (e.g., [0, 1, 2]).
+#     n_random : int
+#         Number of randomized greedy_reduction calls to add.
+#         Each uses a different RNG seed and explores different tie-breaking
+#         within greedy_reduction.  Uses each threshold in threshold_range,
+#         so total randomized calls = n_random * len(threshold_range).
+#     rng_seed : int or None
+#         Base seed for reproducibility of randomized alternatives.
+#
+#     Returns
+#     -------
+#     list of list of (int, int)
+#         Each inner list is a greedy_reduction output: [(control, target), ...].
+#     """
+#     import random as _random
+#
+#     # ── Helper: evaluate one greedy_reduction call ──
+#     def _eval_one(states_arg, thresh, rng_arg):
+#         m_copy = Mat2([row[:] for row in m.data])
+#         ops = greedy_reduction(m_copy, states=states_arg, threshold=thresh, rng=rng_arg)
+#         if ops is None:
+#             return None, None, None
+#
+#         # Apply ops to find extractable rows
+#         m_after = Mat2([row[:] for row in m.data])
+#         for ctrl, tgt in ops:
+#             m_after.data[tgt] = xor_rows(m_after.data[ctrl], m_after.data[tgt])
+#         ext_rows = frozenset(
+#             i for i, row in enumerate(m_after.data) if sum(row) == 1
+#         )
+#
+#         # Count bad CNOTs
+#         bad = 0
+#         if frontier_states is not None:
+#             for c_g, t_g in ops:
+#                 if frontier_states[t_g] == 0 and frontier_states[c_g] == 1:
+#                     bad += 1
+#
+#         return ops, ext_rows, bad
+#
+#     # Group by extractable rows → keep best (fewest bad) per group
+#     by_extraction: Dict[FrozenSet[int], Tuple[List[Tuple[int, int]], int]] = {}
+#
+#     def _record(ops, ext_rows, bad):
+#         if ext_rows not in by_extraction or bad < by_extraction[ext_rows][1]:
+#             by_extraction[ext_rows] = (ops, bad)
+#
+#     # ── Deterministic alternatives ──
+#
+#     # 1. Vanilla (no flavor awareness)
+#     ops, ext_rows, bad = _eval_one(None, 0, None)
+#     if ops is not None:
+#         _record(ops, ext_rows, bad)
+#
+#     # 2. Flavor-aware at each threshold, deterministic
+#     if frontier_states is not None:
+#         for t in threshold_range:
+#             ops, ext_rows, bad = _eval_one(list(frontier_states), t, None)
+#             if ops is not None:
+#                 _record(ops, ext_rows, bad)
+#
+#     # ── Randomized alternatives ──
+#     # Each uses a different RNG seed to explore different tie-breaking
+#     # decisions within greedy_reduction's inner loop.  We test each
+#     # threshold to explore different substitution aggressiveness levels.
+#     if n_random > 0 and frontier_states is not None:
+#         base_rng = _random.Random(rng_seed if rng_seed is not None else 12345)
+#         for i in range(n_random):
+#             for t in threshold_range:
+#                 seed_i = base_rng.randint(0, 2**32 - 1)
+#                 trial_rng = _random.Random(seed_i)
+#                 ops, ext_rows, bad = _eval_one(list(frontier_states), t, trial_rng)
+#                 if ops is not None:
+#                     _record(ops, ext_rows, bad)
+#
+#     return [ops for ops, _bad in by_extraction.values()]
 
 def _has_bad_ops(
     ops: List[Tuple[int, int]],
