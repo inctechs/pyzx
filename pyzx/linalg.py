@@ -145,7 +145,7 @@ class Mat2(object):
         """Permute the columns of the matrix according to the permutation p."""
         self.data = [[self.data[i][j] for j in p] for i in range(self.rows())]
     
-    def gauss(self, full_reduce:bool=False, x:Any=None, y:Any=None, blocksize:int=6, pivot_cols:List[int]=[]) -> int:
+    def gauss(self, full_reduce:bool=False, x:Any=None, y:Any=None, blocksize:int=6, pivot_cols:List[int]=[], states:Any=None) -> int:
         """Compute the echelon form. Returns the number of non-zero rows in the result, i.e.
         the rank of the matrix.
 
@@ -187,15 +187,55 @@ class Mat2(object):
                 t = tuple(self.data[r][i0:i1])
                 if not any(t): continue
                 if t in chunks:
-                    #print('hit (down)', r, chunks[t], t, i0, i1)
-                    self.row_add(chunks[t], r)
-                    if x is not None: x.row_add(chunks[t], r)
-                    if y is not None: y.col_add(r, chunks[t])
+                    source_row = chunks[t]
+                    target_row = r
+                    if states is not None:
+                        # Forbidden: source is UP (1) and target is DOWN (0)
+                        # Safe fix: swap roles — add target into source instead
+                        if states[source_row] == 1 and states[target_row] == 0:
+                            source_row, target_row = target_row, source_row
+                            chunks[t] = source_row
+                    self.row_add(source_row, target_row)
+                    if x is not None: x.row_add(source_row, target_row)
+                    if y is not None: y.col_add(target_row, source_row)
                 else:
                     chunks[t] = r
 
             p = i0
             while p < i1:
+                if states is not None:
+                    # 1. Find all rows in this column (at or below pivot) that have a 1
+                    candidates = [r for r in range(pivot_row, rows) if self.data[r][p] != 0]
+
+                    if len(candidates) > 0:
+                        # 2. Search for a DOWN (0) row (hero) among the candidates
+                        hero_row = next((r for r in candidates if states[r] == 0), candidates[0])
+
+                        # 3. Use hero to eliminate all other candidates (except pivot_row itself)
+                        for r_target in candidates:
+                            if r_target == hero_row or r_target == pivot_row: continue
+                            self.row_add(hero_row, r_target)
+                            if x is not None: x.row_add(hero_row, r_target)
+                            if y is not None: y.col_add(r_target, hero_row)
+
+                        # 4. Move hero to pivot position using 2 row_adds
+                        if hero_row != pivot_row:
+                            # Step 1: add hero into pivot (pivot now has hero's content)
+                            if pivot_row not in candidates:
+                                self.row_add(hero_row, pivot_row)
+                                if x is not None: x.row_add(hero_row, pivot_row)
+                                if y is not None: y.col_add(pivot_row, hero_row)
+                            # Step 2: add pivot into hero (hero is now zeroed in col p)
+                            self.row_add(pivot_row, hero_row)
+                            if x is not None: x.row_add(pivot_row, hero_row)
+                            if y is not None: y.col_add(hero_row, pivot_row)
+
+                        pivot_cols.append(p)
+                        pivot_row += 1
+                        p += 1
+                        continue
+                    else:
+                        pass  # no candidates, fall through to p += 1
                 for r0 in range(pivot_row, rows):
                     if self.data[r0][p] != 0:
                         if r0 != pivot_row:
@@ -345,7 +385,7 @@ class Mat2(object):
             vectors.append(v)
         return vectors
 
-    def to_cnots(self, optimize: bool = False, use_log_blocksize: bool = False) -> List[CNOT]:
+    def to_cnots(self, optimize: bool = False, use_log_blocksize: bool = False, states: List[int] = None) -> List[CNOT]:
         """Returns a list of CNOTs that implements the matrix as a reversible circuit of qubits."""
         cn: Optional[CNOTMaker]
         if not optimize:
@@ -353,14 +393,14 @@ class Mat2(object):
             blocksize = 5
             if use_log_blocksize:
                 blocksize = int(math.log2(self.rows()))
-            self.copy().gauss(full_reduce=True,x=cn, blocksize=blocksize)
+            self.copy().gauss(full_reduce=True,x=cn, blocksize=blocksize, states=states)
         else:
             best = 1000000
             best_cn = None
             for size in range(1,self.rows() + 1):
                 cn = CNOTMaker()
                 assert cn is not None
-                self.copy().gauss(full_reduce=True,x=cn, blocksize=size)
+                self.copy().gauss(full_reduce=True,x=cn, blocksize=size, states=states)
                 if len(cn.cnots) < best:
                     best = len(cn.cnots)
                     best_cn = cn

@@ -18,19 +18,18 @@ __all__ = ['extract_circuit', 'extract_simple', 'graph_to_swaps', 'extract_cliff
            'lookahead_extract_base', 'lookahead_full', 'lookahead_fast', 'lookahead_extract']
 
 from fractions import Fraction
-import itertools
 from typing_extensions import deprecated
 
 from .utils import EdgeType, VertexType, toggle_edge
 from .linalg import Mat2, Z2
-from .simplify import id_simp, tcount, full_reduce, is_graph_like, pivot_simp
+from .simplify import id_simp, full_reduce, is_graph_like, pivot_simp
 from .rewrite_rules import *
 from .circuit import Circuit
-from .circuit.gates import Gate, ParityPhase, CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP, InitAncilla
+from .circuit.gates import CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP
 
 from .graph.base import BaseGraph, VT, ET
 
-from typing import List, Optional, Tuple, Dict, Set, Union, Iterator
+from typing import List, Optional, Tuple, Dict, Set, Union
 
 
 def bi_adj(g: BaseGraph[VT,ET], vs:List[VT], ws:List[VT]) -> Mat2:
@@ -492,7 +491,8 @@ def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map:
 
 
 def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
-                   qubit_map: Dict[VT, int], optimize_czs: bool = True) -> int:
+                   qubit_map: Dict[VT, int], optimize_czs: bool = True,
+                   current_states: Optional[List[int]] = None) -> int:
     """Remove single qubit gates from the frontier and any CZs between the vertices in the frontier
     Returns the number of CZs saved if `optimize_czs` is True; otherwise returns 0"""
     phases = g.phases()
@@ -505,6 +505,10 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
         if g.edge_type(e) == EdgeType.HADAMARD:
             c.add_gate("HAD", q)
             g.set_edge_type(e, EdgeType.SIMPLE)
+            # UPDATE STATE: Toggle 0 <-> 1
+            if current_states is not None:
+                # Assuming H toggles the state (Up (1) <-> Down (0))
+                current_states[qubit_map[v]] = 1 - current_states[qubit_map[v]]
         if phases[v]:
             c.add_gate("ZPhase", q, phases[v])
             g.set_phase(v, 0)
@@ -598,7 +602,8 @@ def extract_circuit(
         optimize_czs: bool = True,
         optimize_cnots: int = 2,
         up_to_perm: bool = False,
-        quiet: bool = True
+        quiet: bool = True,
+        initial_states: Optional[List[int]] = None # List of size n_outputs
         ) -> Circuit:
     """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`,
     it extracts its equivalent set of gates into an instance of :class:`~pyzx.circuit.Circuit`.
@@ -665,10 +670,19 @@ def extract_circuit(
 
     czs_saved = 0
     q: Union[float, int]
+
+    # If initial_states is provided, we disable 'greedy' optimization
+    # because greedy_reduction() is not aware of the forbidden CNOTs.
+    # We force the code to use the matrix/gauss approach.
+    current_states = None
+    if initial_states is not None:
+        if len(initial_states) != len(outputs):
+            raise ValueError("initial_states length must match number of outputs")
+        current_states = list(initial_states)
     
     while True:
         # preprocessing
-        czs_saved += clean_frontier(g, c, frontier, qubit_map, optimize_czs)
+        czs_saved += clean_frontier(g, c, frontier, qubit_map, optimize_czs, current_states)
         
         # Now we can proceed with the actual extraction
         # First make sure that frontier is connected in correct way to inputs
@@ -701,11 +715,18 @@ def extract_circuit(
                 perm = {v: k for k, v in perm.items()}
                 neighbors2 = [neighbors[perm[i]] for i in range(len(neighbors))]
                 m2 = bi_adj(g, neighbors2, frontier)
+
+                row_states = None
+                if current_states is not None:
+                    # For every vertex 'v' in the frontier (which is a row in m2),
+                    # find its logical qubit index 'q', and get the state of 'q'.
+                    row_states = [current_states[qubit_map[v]] for v in frontier]
+
                 if optimize_cnots > 0:
-                    cnots = m2.to_cnots(optimize=True)
+                    cnots = m2.to_cnots(optimize=True, states=row_states)
                 else:
-                    cnots = m2.to_cnots(optimize=False)
-                # Since the matrix is not square, the algorithm sometimes introduces duplicates
+                    cnots = m2.to_cnots(optimize=False, states=row_states)
+
                 cnots = filter_duplicate_cnots(cnots)
 
                 if greedy_operations is not None:
@@ -1509,3 +1530,55 @@ def lookahead_full(g: BaseGraph[VT, ET], optimize_for_depth: bool = False, up_to
         if d1 < d:
             c = c1
     return c
+
+def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, any]:
+    """Count bad CNOTs in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state,
+    CNOT flips the target if control is |1>. All other gates are ignored.
+
+    A CNOT is 'bad' (non-FT) when the control is |0> and target is |1>.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts and a 'details' list
+        with one entry per CNOT containing gate index, qubit indices,
+        their states at that point, and whether it was bad.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1
+        elif name == 'CNOT':
+            ctrl, tgt = gate.control, gate.target
+            is_bad = (states[ctrl] == 0 and states[tgt] == 1)
+            details.append({
+                'gate_index': idx,
+                'control':    ctrl,
+                'target':     tgt,
+                'ctrl_state': states[ctrl],
+                'tgt_state':  states[tgt],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+        # print(f"states: {states}, gate: {gate}")
+
+    # details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total CNOTs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    else:
+        print(f"Total CNOTs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
