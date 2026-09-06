@@ -1071,9 +1071,10 @@ def _simulate_forward(
     threshold: int,
     w_cnot: float,
     w_cz: float,
+    w_msd: float,
 ) -> float:
     """Simulate extraction forward from a snapshot, return cumulative bad-gate cost.
- 
+
     Parameters
     ----------
     snapshot : ExtractionSnapshot
@@ -1091,9 +1092,9 @@ def _simulate_forward(
         Passed to clean_frontier.
     threshold : int
         Threshold for greedy_reduction during simulation rounds.
-    w_cnot, w_cz : float
+    w_cnot, w_cz, w_msd : float
         Weights for the cost function.
- 
+
     Returns
     -------
     float
@@ -1106,8 +1107,8 @@ def _simulate_forward(
     qubit_map = snap.qubit_map
     gadgets = snap.gadgets
     current_states = snap.current_states
- 
-    cost_acc = CostAccumulator(w_cnot, w_cz)
+
+    cost_acc = CostAccumulator(w_cnot, w_cz, w_msd)
  
     # ── Round 0: apply the initial CNOT choice ──
     # Copy m and neighbors (apply_cnots modifies m via row_add,
@@ -1182,11 +1183,12 @@ def _evaluate_lookahead(
     threshold: int,
     w_cnot: float,
     w_cz: float,
+    w_msd: float,
     n_random: int = 0,
     rng_seed: int = None,
 ) -> List[Tuple[int, int]]:
     """Evaluate CNOT alternatives with forward simulation, return best ops.
- 
+
     Parameters
     ----------
     g, c, frontier, qubit_map, gadgets, current_states
@@ -1207,7 +1209,7 @@ def _evaluate_lookahead(
         Passed to clean_frontier during simulation.
     threshold : int
         Threshold used for greedy decisions during simulation.
-    w_cnot, w_cz : float
+    w_cnot, w_cz, w_msd : float
         Weights for the cost function.
  
     Returns
@@ -1257,6 +1259,7 @@ def _evaluate_lookahead(
             threshold=threshold,
             w_cnot=w_cnot,
             w_cz=w_cz,
+            w_msd=w_msd,
         )
         if cost < best_cost:
             best_cost = cost
@@ -1277,6 +1280,7 @@ def extract_circuit(
     lookahead_thresholds: Optional[List[int]] = None,
     w_cnot: float = 1.0,
     w_cz: float = 1.0,
+    w_msd: float = 1.0,
     n_lookahead_random: int = 0,
 ) -> Circuit:
     """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`, 
@@ -1300,7 +1304,7 @@ def extract_circuit(
         lookahead_depth=0     → lookahead disabled (existing behavior)
         lookahead_depth=2     → simulate 2 additional rounds after each alternative
         lookahead_thresholds  → which thresholds to test [default: [0, 1, 2]]
-        w_cnot, w_cz          → cost weights (same semantics as multi_restart_extract)
+        w_cnot, w_cz, w_msd   → cost weights (same semantics as multi_restart_extract)
 
     Raises:
         ValueError: If the graph contains ground vertices or has differing
@@ -1391,7 +1395,7 @@ def extract_circuit(
                         m, neighbors, greedy_operations, frontier_states,
                         lookahead_depth,
                         lookahead_thresholds if lookahead_thresholds is not None else [0, 1, 2],
-                        optimize_czs, threshold, w_cnot, w_cz,
+                        optimize_czs, threshold, w_cnot, w_cz, w_msd,
                         n_random=n_lookahead_random,
                     )
             else:
@@ -1459,6 +1463,7 @@ def multi_restart_extract(
     seed: Optional[int] = None,
     w_cnot: float = 1.0,
     w_cz: float = 1.0,
+    w_msd: float = 1.0,
     lookahead_depth: int = 0,
     lookahead_thresholds: Optional[List[int]] = None,
     n_lookahead_random: int = 0,
@@ -1481,6 +1486,7 @@ def multi_restart_extract(
         seed: Random seed for reproducibility.
         w_cnot: Weight for bad CNOTs in the cost function.
         w_cz: Weight for bad CZs in the cost function.
+        w_msd: Weight for bad (misplaced) phases in the cost function.
 
     Returns:
         (best_circuit, stats) where stats contains cost details and per-restart info.
@@ -1526,21 +1532,25 @@ def multi_restart_extract(
             lookahead_thresholds=lookahead_thresholds,
             w_cnot=w_cnot,
             w_cz=w_cz,
+            w_msd=w_msd,
             n_lookahead_random=n_lookahead_random,
         )
 
-        
+
         circuit_basic = circuit.to_basic_gates()
         cnot_faults = count_cnot_faults(circuit_basic, list(initial_states))
         cz_faults = count_cz_faults(circuit_basic, list(initial_states))
-        cost = w_cnot * cnot_faults['bad'] + w_cz * cz_faults['bad']
-        
+        phase_faults = count_phase_faults(circuit_basic, list(initial_states))
+        cost = w_cnot * cnot_faults['bad'] + w_cz * cz_faults['bad'] + w_msd * phase_faults['bad']
+
         run_stats.append({
             'trial': trial,
             'bad_cnots': cnot_faults['bad'],
             'total_cnots': cnot_faults['total'],
             'bad_czs': cz_faults['bad'],
             'total_czs': cz_faults['total'],
+            'bad_phases': phase_faults['bad'],
+            'total_phases': phase_faults['total'],
             'cost': cost,
         })
         
