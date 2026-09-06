@@ -2468,10 +2468,10 @@ def count_phase_faults(circuit: 'Circuit', final_states: List[int], verbose: boo
         gate = circuit.gates[idx]
         name = gate.name
         if name == 'HAD':
-            states[gate.target] ^= 1
+            states[gate.target] ^= 1  # type: ignore[attr-defined]  # same gap as count_cnot_faults/count_cz_faults
         elif name in _PHASE_GATE_NAMES:
-            q = gate.target
-            is_bad = is_expensive_misplaced_phase(name, gate.phase, states[q])
+            q = gate.target  # type: ignore[attr-defined]
+            is_bad = is_expensive_misplaced_phase(name, gate.phase, states[q])  # type: ignore[attr-defined]
             details.append({
                 'gate_index': idx,
                 'qubit':      q,
