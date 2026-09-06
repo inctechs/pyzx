@@ -20,7 +20,7 @@ __all__ = ['extract_circuit', 'extract_simple', 'graph_to_swaps', 'extract_cliff
 from fractions import Fraction
 from typing_extensions import deprecated
 
-from .utils import EdgeType, VertexType, toggle_edge
+from .utils import EdgeType, VertexType, FractionLike, toggle_edge
 from .linalg import Mat2, Z2
 from .simplify import id_simp, full_reduce, is_graph_like, pivot_simp
 from .rewrite_rules import *
@@ -33,33 +33,72 @@ from .graph.base import BaseGraph, VT, ET
 from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass
 
+# Gate names that carry an inherently non-Pauli Z-diagonal phase (T/T-dagger, S/S-dagger).
+# ZPhase is handled separately below since its Pauli-ness depends on the phase value.
+_Z_DIAG_PHASE_NAMES = frozenset({'T', 'S'})
+
+
+def _is_non_pauli_phase(phase: FractionLike) -> bool:
+    """True iff `phase` (in units of pi) is not an integer multiple of pi, i.e. not a Pauli."""
+    if isinstance(phase, Fraction):
+        return phase.denominator != 1
+    return float(phase) % 1.0 != 0.0
+
+
+def is_expensive_misplaced_phase(gate_name: str, phase: FractionLike, state: int) -> bool:
+    """Shared classifier: is a phase gate expensive given the qubit's flavor `state`?
+
+    state: 0 = R', 1 = R (same convention as CostAccumulator.record_cnot/record_cz).
+
+    Z-diagonal non-Pauli phases (T, S, T-dagger, S-dagger, or a ZPhase gate with a
+    non-integer phase) are expensive on R' (state == 0); X-diagonal non-Pauli phases
+    (XPhase with a non-integer phase) are expensive on R (state == 1). Paulis are
+    always free. This mirrors SigmaTracker's _is_z_diagonal_expensive and the XPhase
+    branch of CircuitStructure._analyze (mqt.qecc.tetrahedral_synthesis.sigma_tracker)
+    so the two cost models cannot silently diverge.
+    """
+    if gate_name in _Z_DIAG_PHASE_NAMES or (gate_name == 'ZPhase' and _is_non_pauli_phase(phase)):
+        return state == 0
+    if gate_name == 'XPhase' and _is_non_pauli_phase(phase):
+        return state == 1
+    return False
+
+
 class CostAccumulator:
     """Mutable counter for bad gates during extraction simulation.
- 
+
     Passed into clean_frontier and apply_cnots via an optional parameter.
     When None is passed instead, those functions behave identically to before.
     """
-    __slots__ = ('w_cnot', 'w_cz', 'bad_cnots', 'bad_czs')
- 
-    def __init__(self, w_cnot: float = 1.0, w_cz: float = 1.0) -> None:
+    __slots__ = ('w_cnot', 'w_cz', 'w_msd', 'bad_cnots', 'bad_czs', 'bad_phases')
+
+    def __init__(self, w_cnot: float = 1.0, w_cz: float = 1.0, w_msd: float = 1.0) -> None:
         self.w_cnot = w_cnot
         self.w_cz = w_cz
+        self.w_msd = w_msd
         self.bad_cnots = 0
         self.bad_czs = 0
- 
+        self.bad_phases = 0
+
     def record_cnot(self, control_state: int, target_state: int) -> None:
         """Record a CNOT gate.  Bad when control=R'(0), target=R(1)."""
         if control_state == 0 and target_state == 1:
             self.bad_cnots += 1
- 
+
     def record_cz(self, state_a: int, state_b: int) -> None:
         """Record a CZ gate.  Bad when both qubits are R'(0)."""
         if state_a == 0 and state_b == 0:
             self.bad_czs += 1
- 
+
+    def record_phase(self, state: int, phase: FractionLike) -> None:
+        """Record a ZPhase gate emitted onto the frontier (clean_frontier always
+        emits phases as ZPhase). Bad when non-Pauli and the qubit is R'(0)."""
+        if is_expensive_misplaced_phase('ZPhase', phase, state):
+            self.bad_phases += 1
+
     @property
     def cost(self) -> float:
-        return self.w_cnot * self.bad_cnots + self.w_cz * self.bad_czs
+        return self.w_cnot * self.bad_cnots + self.w_cz * self.bad_czs + self.w_msd * self.bad_phases
 
 
 @dataclass
