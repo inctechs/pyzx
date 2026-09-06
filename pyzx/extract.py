@@ -2431,3 +2431,52 @@ def count_cz_faults(circuit: 'Circuit', final_states: List[int], verbose: bool =
             print(d)
     return {'bad': bad, 'safe': safe, 'total': bad + safe}
 
+# Gate names that carry a phase relevant to is_expensive_misplaced_phase.
+_PHASE_GATE_NAMES = frozenset({'ZPhase', 'XPhase', 'T', 'S'})
+
+def count_phase_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, int]:
+    """Count expensive misplaced Z/X-diagonal phases in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state. All other
+    gates are ignored except phase gates (ZPhase, XPhase, T, S), which are
+    classified via the shared is_expensive_misplaced_phase predicate -- the
+    same one used by CostAccumulator.record_phase, so this matches what
+    SigmaTracker (mqt.qecc.tetrahedral_synthesis.sigma_tracker) counts as MSD.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1
+        elif name in _PHASE_GATE_NAMES:
+            q = gate.target
+            is_bad = is_expensive_misplaced_phase(name, gate.phase, states[q])
+            details.append({
+                'gate_index': idx,
+                'qubit':      q,
+                'state':      states[q],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+
+    details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total phases: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
+
