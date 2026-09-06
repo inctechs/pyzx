@@ -30,7 +30,7 @@ import random
 
 from .graph.base import BaseGraph, VT, ET
 
-from typing import List, Optional, Tuple, Dict, Set, Union, FrozenSet
+from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass
 
 class CostAccumulator:
@@ -831,20 +831,29 @@ def _generate_cnot_alternatives(
  
         return ext_rows, bad
  
-    # Group by extractable rows → keep best (fewest bad) per group.
-    # Same extractable rows = same downstream frontier evolution,
-    # so only the immediate CNOT cost differs → pick lowest cost.
-    by_extraction: Dict[FrozenSet[int], Tuple[List[Tuple[int, int]], int]] = {}
- 
+    # # Group by extractable rows → keep best (fewest bad) per group.
+    # # Same extractable rows = same downstream frontier evolution,
+    # # so only the immediate CNOT cost differs → pick lowest cost.
+    # by_extraction: Dict[FrozenSet[int], Tuple[List[Tuple[int, int]], int]] = {}
+    #
+    # def _record(ops):
+    #     """Record an alternative, deduplicating by extractable rows."""
+    #     if ops is None:
+    #         return
+    #     ext_rows, bad = _evaluate_ops(ops)
+    #     if not ext_rows:
+    #         return  # No extractable rows — invalid
+    #     if ext_rows not in by_extraction or bad < by_extraction[ext_rows][1]:
+    #         by_extraction[ext_rows] = (ops, bad)
+
+    seen_ops: Dict[Tuple[Tuple[int, int], ...], None] = {}
+
     def _record(ops):
-        """Record an alternative, deduplicating by extractable rows."""
         if ops is None:
             return
-        ext_rows, bad = _evaluate_ops(ops)
-        if not ext_rows:
-            return  # No extractable rows — invalid
-        if ext_rows not in by_extraction or bad < by_extraction[ext_rows][1]:
-            by_extraction[ext_rows] = (ops, bad)
+        ops_key = tuple(ops)
+        if ops_key not in seen_ops:
+            seen_ops[ops_key] = None
  
     # ═══════════════════════════════════════════════════════════════
     # SOURCE 1: Vanilla greedy (no flavor awareness)
@@ -899,7 +908,8 @@ def _generate_cnot_alternatives(
                     threshold=t, rng=trial_rng,
                 ))
  
-    return [ops for ops, _bad in by_extraction.values()]
+    # return [ops for ops, _bad in by_extraction.values()]
+    return [list(ops_key) for ops_key in seen_ops]
 
 # def _generate_cnot_alternatives(
 #     m: Mat2,
