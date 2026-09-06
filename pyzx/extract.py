@@ -661,6 +661,9 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
                 current_states[qubit_map[v]] = 1 - current_states[qubit_map[v]]
         if phases[v]:
             c.add_gate("ZPhase", q, phases[v])
+            if cost_acc is not None and current_states is not None:
+                # current_states[q] is already post-HAD-toggle (emission-time) state.
+                cost_acc.record_phase(current_states[q], phases[v])
             g.set_phase(v, 0)
     # And now on to CZ gates
     cz_mat = Mat2([[0 for i in range(len(outputs))] for j in range(len(outputs))])
