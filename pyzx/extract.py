@@ -18,19 +18,18 @@ __all__ = ['extract_circuit', 'extract_simple', 'graph_to_swaps', 'extract_cliff
            'lookahead_extract_base', 'lookahead_full', 'lookahead_fast', 'lookahead_extract']
 
 from fractions import Fraction
-import itertools
 from typing_extensions import deprecated
 
 from .utils import EdgeType, VertexType, toggle_edge
 from .linalg import Mat2, Z2
-from .simplify import id_simp, tcount, full_reduce, is_graph_like, pivot_simp
+from .simplify import id_simp, full_reduce, is_graph_like, pivot_simp
 from .rewrite_rules import *
 from .circuit import Circuit
-from .circuit.gates import Gate, ParityPhase, CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP, InitAncilla
+from .circuit.gates import CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP
 
 from .graph.base import BaseGraph, VT, ET
 
-from typing import List, Optional, Tuple, Dict, Set, Union, Iterator
+from typing import List, Optional, Tuple, Dict, Set, Union
 
 
 def bi_adj(g: BaseGraph[VT,ET], vs:List[VT], ws:List[VT]) -> Mat2:
@@ -200,36 +199,64 @@ def find_minimal_sums(m: Mat2, reversed_search=False) -> Optional[Tuple[int, ...
         combs = combs2
 
 
-def greedy_reduction(m: Mat2) -> Optional[List[Tuple[int, int]]]:
+def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int = 0) -> Optional[List[Tuple[int, int]]]:
     """Returns a list of tuples (r1,r2) that specify which row should be added to which other row
-    in order to reduce one row of m to only contain a single 1. 
-    Used in :func:`extract_circuit` and :func:`lookahead_extract_base`"""
+    in order to reduce one row of m to only contain a single 1.
+    Used in :func:`extract_circuit` and :func:`lookahead_extract_base`.
+
+    If states is provided, prefers fault-tolerant CNOTs (avoids control=|0>, target=|1>).
+    threshold: accept a safe CNOT even if it reduces up to `threshold` fewer 1s than
+    the best available reduction. Only has effect when states is provided and the best
+    candidate is a bad CNOT."""
     indicest = find_minimal_sums(m)
     if indicest is None: return indicest
     indices = list(indicest)
-    rows = {i:m.data[i] for i in indices}
+    rows = {i: m.data[i] for i in indices}
     weights: Dict[int,int] = {i: sum(r) for i,r in rows.items()}
     result = []
-    while len(indices)>1:
-        best = (-1,-1)
+    while len(indices) > 1:
+        best = (-1, -1)
+        best_is_bad = True
         reduction = -10000
+        best_safe = (-1, -1)
+        best_safe_reduction = -10000
         for i in indices:
             for j in indices:
                 if j <= i: continue
-                w = sum(xor_rows(rows[i],rows[j]))
-                if weights[i] - w > reduction:
-                    best = (j,i) # "Add row j to i"
-                    reduction = weights[i] - w
-                if weights[j] - w > reduction:
-                    best = (i,j)
-                    reduction = weights[j] - w
-        result.append(best)
-        control, target = best
-        rows[target] = xor_rows(rows[control],rows[target])
-        weights[target] = weights[target] - reduction
+                w = sum(xor_rows(rows[i], rows[j]))
+                # Option A: add j to i which later translates to (control=j, target=i)
+                # NOTE: row addition according to Z parity, hence adding row j to i results
+                # in CNOT with control i and target j
+                red_A = weights[i] - w
+                bad_A = (states is not None and states[i] == 0 and states[j] == 1)
+                # Option B: add i to j which later translates to (control=i, target=j)
+                red_B = weights[j] - w
+                bad_B = (states is not None and states[j] == 0 and states[i] == 1)
+                for (red, bad, candidate) in [(red_A, bad_A, (j,i)), (red_B, bad_B, (i,j))]:
+                    if red > reduction:
+                        best = candidate
+                        reduction = red
+                        best_is_bad = bad
+                    elif red == reduction and best_is_bad and not bad:
+                        best = candidate
+                        best_is_bad = False
+                    if not bad and red > best_safe_reduction:
+                        best_safe = candidate
+                        best_safe_reduction = red
+
+        if states is not None and best_is_bad and best_safe != (-1,-1) and best_safe_reduction >= reduction - threshold:
+            chosen = best_safe
+            chosen_reduction = best_safe_reduction
+        else:
+            chosen = best
+            chosen_reduction = reduction
+
+        result.append(chosen)
+        control, target = chosen
+        rows[target] = xor_rows(rows[control], rows[target])
+        weights[target] = weights[target] - chosen_reduction
         indices.remove(control)
     return result
-
 
 def flat_indices(m: Mat2, indices: List[int]) -> Tuple[List[Tuple[int, int]], int]:
     """Given a matrix and a list of row indices that have to be added together,
@@ -452,7 +479,7 @@ def remove_extra_cnots(cnots_to_apply: List[CNOT], mat: Mat2) -> List[CNOT]:
 
 
 def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map: Dict[VT, int],
-                cnots: List[CNOT], m: Mat2, neighbors: List[VT]) -> int:
+                cnots: List[CNOT], m: Mat2, neighbors: List[VT], current_states: Optional[List[int]] = None) -> int:
     """Adds the list of CNOTs to the circuit, modifying the graph, frontier, and qubit map as needed.
     Returns the number of vertices that end up being extracted"""
     if len(cnots) > 0:
@@ -487,12 +514,15 @@ def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map:
         c.add_gate(cnot)
     for h in hads:
         c.add_gate("HAD", h)
+        if current_states is not None:
+            current_states[h] = 1 - current_states[h]
 
     return len(good_verts)
 
 
 def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
-                   qubit_map: Dict[VT, int], optimize_czs: bool = True) -> int:
+                   qubit_map: Dict[VT, int], optimize_czs: bool = True,
+                   current_states: Optional[List[int]] = None) -> int:
     """Remove single qubit gates from the frontier and any CZs between the vertices in the frontier
     Returns the number of CZs saved if `optimize_czs` is True; otherwise returns 0"""
     phases = g.phases()
@@ -505,6 +535,10 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
         if g.edge_type(e) == EdgeType.HADAMARD:
             c.add_gate("HAD", q)
             g.set_edge_type(e, EdgeType.SIMPLE)
+            # UPDATE STATE: Toggle 0 <-> 1
+            if current_states is not None:
+                # Assuming H toggles the state (Up (1) <-> Down (0))
+                current_states[qubit_map[v]] = 1 - current_states[qubit_map[v]]
         if phases[v]:
             c.add_gate("ZPhase", q, phases[v])
             g.set_phase(v, 0)
@@ -598,7 +632,9 @@ def extract_circuit(
         optimize_czs: bool = True,
         optimize_cnots: int = 2,
         up_to_perm: bool = False,
-        quiet: bool = True
+        quiet: bool = True,
+        initial_states: Optional[List[int]] = None, # List of size n_outputs
+        threshold: int = 0,
         ) -> Circuit:
     """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`,
     it extracts its equivalent set of gates into an instance of :class:`~pyzx.circuit.Circuit`.
@@ -616,6 +652,8 @@ def extract_circuit(
         optimize_cnots: (0,1,2,3) Level of CNOT optimization to apply.
         up_to_perm: If true, returns a circuit that is equivalent to the given graph up to a permutation of the inputs.
         quiet: Whether to print detailed output of the extraction process.
+        initial_states: If provided, describes the initial states of the 3D color code for each logical qubit. 0 -> downward, 1 -> upward (regular)
+        threshold: When optimizing CNOTs, accept a safe CNOT even if it reduces up to `threshold` fewer 1s than the best available reduction. Only has effect when `initial_states` is provided and the best candidate is a bad CNOT.
 
     Raises:
         ValueError: If the graph contains ground vertices or has differing
@@ -665,10 +703,16 @@ def extract_circuit(
 
     czs_saved = 0
     q: Union[float, int]
+
+    current_states = None
+    if initial_states is not None:
+        if len(initial_states) != len(outputs):
+            raise ValueError("initial_states length must match number of outputs")
+        current_states = list(initial_states)
     
     while True:
         # preprocessing
-        czs_saved += clean_frontier(g, c, frontier, qubit_map, optimize_czs)
+        czs_saved += clean_frontier(g, c, frontier, qubit_map, optimize_czs, current_states)
         
         # Now we can proceed with the actual extraction
         # First make sure that frontier is connected in correct way to inputs
@@ -686,7 +730,7 @@ def extract_circuit(
         m = bi_adj(g, neighbors, frontier)
         if all(sum(row) != 1 for row in m.data):  # No easy vertex
             if optimize_cnots > 1:
-                greedy_operations = greedy_reduction(m)
+                greedy_operations = greedy_reduction(m, states=current_states, threshold=threshold)
             else:
                 greedy_operations = None
 
@@ -696,7 +740,10 @@ def extract_circuit(
                     print("Found greedy reduction with", len(greedy), "CNOT")
                 cnots = greedy
 
+            gaussian_fallback_count = 0
+
             if greedy_operations is None or (optimize_cnots == 3 and len(greedy) > 1):
+                gaussian_fallback_count += 1
                 perm = column_optimal_swap(m)
                 perm = {v: k for k, v in perm.items()}
                 neighbors2 = [neighbors[perm[i]] for i in range(len(neighbors))]
@@ -725,7 +772,7 @@ def extract_circuit(
             if not quiet: print("Simple vertex")
             cnots = []
 
-        extracted = apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors)
+        extracted = apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors, current_states=current_states)
         if not quiet: print("Vertices extracted:", extracted)
             
     if optimize_czs:
@@ -734,6 +781,7 @@ def extract_circuit(
     id_simp(g)  # Now the graph should only contain inputs and outputs
     # Since we were extracting from right to left, we reverse the order of the gates
     c.gates = list(reversed(c.gates))
+    # print("Number of times Gaussian elimination was used:", gaussian_fallback_count)
     return graph_to_swaps(g, up_to_perm) + c
 
 
@@ -1509,3 +1557,103 @@ def lookahead_full(g: BaseGraph[VT, ET], optimize_for_depth: bool = False, up_to
         if d1 < d:
             c = c1
     return c
+
+def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, any]:
+    """Count bad CNOTs in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state,
+    CNOT flips the target if control is |1>. All other gates are ignored.
+
+    A CNOT is 'bad' (non-FT) when the control is |0> and target is |1>.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts and a 'details' list
+        with one entry per CNOT containing gate index, qubit indices,
+        their states at that point, and whether it was bad.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1
+        elif name == 'CNOT':
+            ctrl, tgt = gate.control, gate.target
+            is_bad = (states[ctrl] == 0 and states[tgt] == 1)
+            details.append({
+                'gate_index': idx,
+                'control':    ctrl,
+                'target':     tgt,
+                'ctrl_state': states[ctrl],
+                'tgt_state':  states[tgt],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+        # print(f"states: {states}, gate: {gate}")
+
+    # details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total CNOTs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
+
+def count_cz_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, any]:
+    """Count bad CZ gates in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state.
+    All other gates are ignored.
+
+    A CZ is 'bad' (non-FT) when both participating qubits are in the |0> state.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts and a 'details' list
+        with one entry per CZ containing gate index, qubit indices,
+        their states at that point, and whether it was bad.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1
+        elif name == 'CZ':
+            q1, q2 = gate.control, gate.target
+            is_bad = (states[q1] == 0 and states[q2] == 0)
+            details.append({
+                'gate_index': idx,
+                'qubit1':     q1,
+                'qubit2':     q2,
+                'q1_state':   states[q1],
+                'q2_state':   states[q2],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+
+    details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total CZs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
+
