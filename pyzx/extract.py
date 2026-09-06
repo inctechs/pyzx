@@ -30,7 +30,7 @@ import random
 
 from .graph.base import BaseGraph, VT, ET
 
-from typing import List, Optional, Tuple, Dict, Set, Union
+from typing import List, Optional, Tuple, Dict, Set, Union, Any
 from dataclasses import dataclass
 
 # Gate names that carry an inherently non-Pauli Z-diagonal phase (T/T-dagger, S/S-dagger).
@@ -1467,7 +1467,7 @@ def multi_restart_extract(
     lookahead_depth: int = 0,
     lookahead_thresholds: Optional[List[int]] = None,
     n_lookahead_random: int = 0,
-) -> Tuple[Circuit, Dict[str, any]]:
+) -> Tuple[Circuit, Dict[str, Any]]:
     """Run extract_circuit multiple times with randomized tie-breaking,
     keeping the result with the lowest weighted bad-gate cost.
 
@@ -2342,7 +2342,7 @@ def lookahead_full(g: BaseGraph[VT, ET], optimize_for_depth: bool = False, up_to
             c = c1
     return c
 
-def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, any]:
+def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, int]:
     """Count bad CNOTs in a circuit given final qubit states.
 
     Loops backwards through the circuit. HAD toggles a qubit's state,
@@ -2392,7 +2392,7 @@ def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool
             print(d)
     return {'bad': bad, 'safe': safe, 'total': bad + safe}
 
-def count_cz_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, any]:
+def count_cz_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, int]:
     """Count bad CZ gates in a circuit given final qubit states.
 
     Loops backwards through the circuit. HAD toggles a qubit's state.
