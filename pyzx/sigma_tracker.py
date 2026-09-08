@@ -183,9 +183,9 @@ class CircuitStructure:
             # --- Z-diagonal non-Pauli (T, S, ZPhase) ---
             elif _is_z_diagonal_expensive(gate):
                 q = gate.target  # type: ignore[attr-defined]
-                # Expensive iff σ_q(0) ⊕ h_parity_q = R'  (i.e. = 1)
-                # ⇔ σ_q(0) = 1 ⊕ h_parity_q
-                bad_init = Flavor(1 ^ parity[q])
+                # Expensive iff σ_q(0) ⊕ h_parity_q = R' (Flavor.R_PRIME = 0)
+                # ⇔ σ_q(0) = 0 ⊕ h_parity_q
+                bad_init = Flavor(0 ^ parity[q])
                 self.potential_costs.append(_PotentialCost(
                     gate_index=gate_idx,
                     gate_name=name + ("†" if getattr(gate, "adjoint", False) else ""),
@@ -197,10 +197,10 @@ class CircuitStructure:
             # --- CNOT: expensive iff control=R', target=R ---
             elif name == "CNOT":
                 c, t = gate.control, gate.target  # type: ignore[attr-defined]
-                # σ_c(0) ⊕ parity_c = R' ⇔ σ_c(0) = 1 ⊕ parity_c
-                # σ_t(0) ⊕ parity_t = R  ⇔ σ_t(0) = 0 ⊕ parity_t
-                bad_c = Flavor(1 ^ parity[c])
-                bad_t = Flavor(0 ^ parity[t])
+                # σ_c(0) ⊕ parity_c = R' (=0) ⇔ σ_c(0) = 0 ⊕ parity_c
+                # σ_t(0) ⊕ parity_t = R  (=1) ⇔ σ_t(0) = 1 ⊕ parity_t
+                bad_c = Flavor(0 ^ parity[c])
+                bad_t = Flavor(1 ^ parity[t])
                 self.potential_costs.append(_PotentialCost(
                     gate_index=gate_idx,
                     gate_name="CNOT",
@@ -212,10 +212,10 @@ class CircuitStructure:
             # --- CZ: expensive iff both R' ---
             elif name == "CZ":
                 q1, q2 = gate.control, gate.target  # type: ignore[attr-defined]
-                # σ_q1(0) ⊕ parity_q1 = R' ⇔ σ_q1(0) = 1 ⊕ parity_q1
-                # σ_q2(0) ⊕ parity_q2 = R' ⇔ σ_q2(0) = 1 ⊕ parity_q2
-                bad_q1 = Flavor(1 ^ parity[q1])
-                bad_q2 = Flavor(1 ^ parity[q2])
+                # σ_q1(0) ⊕ parity_q1 = R' (=0) ⇔ σ_q1(0) = 0 ⊕ parity_q1
+                # σ_q2(0) ⊕ parity_q2 = R' (=0) ⇔ σ_q2(0) = 0 ⊕ parity_q2
+                bad_q1 = Flavor(0 ^ parity[q1])
+                bad_q2 = Flavor(0 ^ parity[q2])
                 self.potential_costs.append(_PotentialCost(
                     gate_index=gate_idx,
                     gate_name="CZ",
@@ -232,8 +232,9 @@ class CircuitStructure:
                     float(phase) % 1.0 == 0.0
                 )
                 if not is_pauli:
-                    # Expensive iff σ_q(0) ⊕ parity_q = R (= 0)
-                    bad_init = Flavor(0 ^ parity[q])
+                    # Expensive iff σ_q(0) ⊕ parity_q = R (Flavor.R = 1)
+                    # ⇔ σ_q(0) = 1 ⊕ parity_q
+                    bad_init = Flavor(1 ^ parity[q])
                     self.potential_costs.append(_PotentialCost(
                         gate_index=gate_idx,
                         gate_name="XPhase",

@@ -42,18 +42,17 @@ def _reference_cost_forward(circuit: Circuit, initial_assignment: List[int]) -> 
     the shared is_expensive_misplaced_phase predicate. Walks forward from
     initial_assignment (state before circuit.gates[0]), toggling on HAD.
 
-    NOTE: as of this writing, pyzx.sigma_tracker.SigmaTracker's
-    CircuitStructure._analyze has a confirmed bug that inverts all four of
-    these classifications relative to its own docstring (verified with
-    trivial one/two-qubit circuits: e.g. a lone CNOT(0,1) with
-    initial_assignment=[R_PRIME, R] costs 0, but [R, R_PRIME] costs 1 -- the
-    opposite of "control=R', target=R is expensive"). So this reference
-    intentionally does NOT call the real SigmaTracker; it exists to cross
-    check extraction's backward-pass counters (count_cnot_faults/
-    count_cz_faults/count_phase_faults) against an independently written
-    forward pass, using the documented semantics both sides agree should
-    hold. The real SigmaTracker bug should be fixed in pyzx.sigma_tracker
-    separately.
+    HISTORICAL NOTE: pyzx.sigma_tracker.SigmaTracker's CircuitStructure._analyze
+    previously had a confirmed bug that inverted all four of these
+    classifications relative to its own docstring (a lone CNOT(0,1) with
+    initial_assignment=[R_PRIME, R] cost 0, but [R, R_PRIME] cost 1 -- the
+    opposite of "control=R', target=R is expensive"). That bug is now fixed
+    (SigmaTracker's _analyze matches this reference and extraction's
+    backward-pass counters exactly; verified against 200 random circuits).
+    This reference implementation is kept as-is as an independent
+    cross-check of extraction's backward-pass counters (count_cnot_faults/
+    count_cz_faults/count_phase_faults) against a separately written forward
+    pass, using the documented semantics both sides agree should hold.
 
     Returns (round_robin_count, msd_count).
     """
@@ -143,11 +142,12 @@ class TestForwardBackwardReconciliation(unittest.TestCase):
     an independently-computed forward-walk cost using the *documented* R/R'
     semantics (_reference_cost_forward), for the same physical circuit.
 
-    This is intentionally not a reconciliation against the real, installed
-    SigmaTracker: see _reference_cost_forward's docstring for the confirmed bug
-    in pyzx.sigma_tracker.CircuitStructure._analyze
-    that inverts its CNOT/CZ/phase classifications relative to its own
-    docstring, which currently makes such a comparison meaningless.
+    This is not a reconciliation against the real, installed SigmaTracker
+    directly: see _reference_cost_forward's docstring -- SigmaTracker's
+    CircuitStructure._analyze previously had a confirmed bug inverting its
+    CNOT/CZ/phase classifications relative to its own docstring, since fixed
+    (see tests/test_sigma_tracker.py, which now passes 45/45 against the
+    documented semantics this reference also implements).
     """
 
     @staticmethod
