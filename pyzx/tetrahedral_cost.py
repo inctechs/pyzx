@@ -15,6 +15,12 @@ flavor" identically. This module is the single implementation of that
 classification, imported by both, so the two cost models cannot silently
 diverge. It imports nothing from `.extract` or `.sigma_tracker` (no import
 cycles).
+
+This module also carries `expand_rr_weight`, the two-resource weight
+contract shared by the cost-aware extraction pipeline: the paper's cost
+model treats round-robin CZ and the forbidden-direction CNOT as a single
+resource, so `w_cnot == w_cz` everywhere except standalone `extract_circuit`
+(kept independent there for generality).
 """
 
 from __future__ import annotations
@@ -56,3 +62,21 @@ def is_expensive_misplaced_phase(gate_name: str, phase: FractionLike, state: int
     if gate_name == 'XPhase' and _is_non_pauli_phase(phase):
         return state == 1
     return False
+
+
+def expand_rr_weight(w_rr: float, w_msd: float) -> tuple[float, float, float]:
+    """Expand the two-resource (w_rr, w_msd) weight pair into extraction's
+    three-weight (w_cnot, w_cz, w_msd) signature, enforcing w_cnot == w_cz == w_rr.
+
+    The paper's cost model treats round-robin CZ and the forbidden-direction
+    CNOT as a single resource (one weight, w_rr). extract.py's standalone
+    extract_circuit keeps independent w_cnot/w_cz parameters for generality,
+    but every cost-aware pipeline entry point (multi_restart_extract, and any
+    direct extract_circuit call made for the paper's cost-aware experiments)
+    must not let them differ. Constructing weights through this one helper,
+    rather than passing w_cnot/w_cz by hand at each call site, is what makes
+    an accidental w_cnot != w_cz impossible to introduce.
+
+    Returns (w_cnot, w_cz, w_msd) == (w_rr, w_rr, w_msd).
+    """
+    return w_rr, w_rr, w_msd

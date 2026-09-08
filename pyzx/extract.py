@@ -1455,13 +1455,27 @@ def multi_restart_extract(
         up_to_perm: Passed to extract_circuit.
         quiet: Passed to extract_circuit.
         seed: Random seed for reproducibility.
-        w_cnot: Weight for bad CNOTs in the cost function.
-        w_cz: Weight for bad CZs in the cost function.
+        w_cnot: Weight for bad CNOTs in the cost function. Must equal w_cz (see below).
+        w_cz: Weight for bad CZs in the cost function. Must equal w_cnot (see below).
         w_msd: Weight for bad (misplaced) phases in the cost function.
+
+    The cost model treats round-robin CZ and the forbidden-direction CNOT as
+    one resource, so w_cnot and w_cz must be equal here -- unlike standalone
+    extract_circuit, which keeps them independent for generality. This is
+    enforced below rather than merged into a single parameter, to avoid an
+    API change; prefer pyzx.tetrahedral_cost.expand_rr_weight(w_rr, w_msd) to
+    construct (w_cnot, w_cz, w_msd) for this call so the two can't drift.
 
     Returns:
         (best_circuit, stats) where stats contains cost details and per-restart info.
     """
+    assert w_cnot == w_cz, (
+        f"multi_restart_extract requires w_cnot == w_cz (got {w_cnot} != {w_cz}): "
+        "round-robin CZ and the forbidden-direction CNOT are one resource in this "
+        "cost model. Use pyzx.tetrahedral_cost.expand_rr_weight(w_rr, w_msd) to "
+        "construct matching weights, or use standalone extract_circuit directly "
+        "if you genuinely need independent CNOT/CZ weights."
+    )
     master_rng = random.Random(seed)
     
     best_circuit = None
