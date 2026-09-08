@@ -36,14 +36,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from fractions import Fraction
 from typing import TYPE_CHECKING
+
+from .tetrahedral_cost import _PHASE_GATE_NAMES, is_expensive_misplaced_phase
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from .circuit import Circuit
-    from .circuit.gates import Gate
 
 
 
@@ -96,29 +96,13 @@ class ExpensiveOp:
 # Gate names (from PyZX) that toggle the σ-flavor
 _H_GATES = frozenset({"HAD"})
 
-# Z-diagonal phase gates: free on R, expensive on R'
-# These are NOT Paulis — Z itself is handled separately (it's free everywhere).
-_Z_DIAG_PHASE_NAMES = frozenset({"T", "S"})
-
 # Pauli names — always free on any CSS code
 _PAULI_NAMES = frozenset({"Z", "NOT", "X", "Y"})
 
-
-def _is_z_diagonal_expensive(gate: Gate) -> bool:
-    """Check if a gate is a non-Pauli Z-diagonal gate (expensive on R').
-
-    Handles T, S (and their adjoints), and also ZPhase gates with
-    non-integer phase (ZPhase(1) = Z is Pauli, hence free).
-    """
-    if gate.name in _Z_DIAG_PHASE_NAMES:
-        return True
-    # ZPhase with non-integer phase (integer multiples of π are Paulis)
-    if gate.name == "ZPhase":
-        phase = gate.phase  # type: ignore[attr-defined]
-        if isinstance(phase, Fraction):
-            return phase.denominator != 1  # integer phase → Pauli → free
-        return float(phase) % 1.0 != 0.0
-    return False
+# Phase-gate classification (is a T/S/ZPhase/XPhase gate expensive given the
+# qubit's flavor?) is implemented once, in pyzx.tetrahedral_cost, and shared
+# with pyzx.extract's CostAccumulator/count_phase_faults -- see
+# _PHASE_GATE_NAMES / is_expensive_misplaced_phase, imported above.
 
 
 # ---------------------------------------------------------------------------
@@ -180,19 +164,34 @@ class CircuitStructure:
             if name in _H_GATES:
                 parity[gate.target] ^= 1  # type: ignore[attr-defined]
 
-            # --- Z-diagonal non-Pauli (T, S, ZPhase) ---
-            elif _is_z_diagonal_expensive(gate):
+            # --- Phase gates (T, S, ZPhase, XPhase): expensive on R' or R ---
+            # depending on gate/phase, per the shared is_expensive_misplaced_phase
+            # classifier. Z-diagonal-type gates (T, S, non-Pauli ZPhase) are
+            # expensive at state 0 (R'); XPhase-type (non-Pauli XPhase) at
+            # state 1 (R); Paulis are never expensive at either state.
+            elif name in _PHASE_GATE_NAMES:
                 q = gate.target  # type: ignore[attr-defined]
-                # Expensive iff σ_q(0) ⊕ h_parity_q = R' (Flavor.R_PRIME = 0)
-                # ⇔ σ_q(0) = 0 ⊕ h_parity_q
-                bad_init = Flavor(0 ^ parity[q])
-                self.potential_costs.append(_PotentialCost(
-                    gate_index=gate_idx,
-                    gate_name=name + ("†" if getattr(gate, "adjoint", False) else ""),
-                    cost_type=CostType.MSD,
-                    qubits=(q,),
-                    expensive_if={q: bad_init},
-                ))
+                phase = gate.phase  # type: ignore[attr-defined]
+                bad_init: Flavor | None
+                if is_expensive_misplaced_phase(name, phase, 0):
+                    # Expensive iff σ_q(0) ⊕ h_parity_q = R' (=0)
+                    # ⇔ σ_q(0) = 0 ⊕ h_parity_q
+                    bad_init = Flavor(0 ^ parity[q])
+                elif is_expensive_misplaced_phase(name, phase, 1):
+                    # Expensive iff σ_q(0) ⊕ h_parity_q = R (=1)
+                    # ⇔ σ_q(0) = 1 ⊕ h_parity_q
+                    bad_init = Flavor(1 ^ parity[q])
+                else:
+                    bad_init = None  # Pauli phase: never expensive, no potential cost.
+
+                if bad_init is not None:
+                    self.potential_costs.append(_PotentialCost(
+                        gate_index=gate_idx,
+                        gate_name=name + ("†" if getattr(gate, "adjoint", False) else ""),
+                        cost_type=CostType.MSD,
+                        qubits=(q,),
+                        expensive_if={q: bad_init},
+                    ))
 
             # --- CNOT: expensive iff control=R', target=R ---
             elif name == "CNOT":
@@ -224,26 +223,8 @@ class CircuitStructure:
                     expensive_if={q1: bad_q1, q2: bad_q2},
                 ))
 
-            # --- XPhase (non-Pauli, X-diagonal): expensive on R ---
-            elif name == "XPhase":
-                q = gate.target  # type: ignore[attr-defined]
-                phase = gate.phase  # type: ignore[attr-defined]
-                is_pauli = (isinstance(phase, Fraction) and phase.denominator == 1) or (
-                    float(phase) % 1.0 == 0.0
-                )
-                if not is_pauli:
-                    # Expensive iff σ_q(0) ⊕ parity_q = R (Flavor.R = 1)
-                    # ⇔ σ_q(0) = 1 ⊕ parity_q
-                    bad_init = Flavor(1 ^ parity[q])
-                    self.potential_costs.append(_PotentialCost(
-                        gate_index=gate_idx,
-                        gate_name="XPhase",
-                        cost_type=CostType.MSD,
-                        qubits=(q,),
-                        expensive_if={q: bad_init},
-                    ))
-
             # Paulis, SWAP, identity, etc. → always free, no parity change
+            # (XPhase is handled above, in the _PHASE_GATE_NAMES branch.)
 
         # Final parity snapshot (after all gates)
         self.h_parity.append(list(parity))

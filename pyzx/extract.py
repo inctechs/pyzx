@@ -26,42 +26,13 @@ from .simplify import id_simp, full_reduce, is_graph_like, pivot_simp
 from .rewrite_rules import *
 from .circuit import Circuit
 from .circuit.gates import CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP
+from .tetrahedral_cost import is_expensive_misplaced_phase, _PHASE_GATE_NAMES
 import random
 
 from .graph.base import BaseGraph, VT, ET
 
 from typing import List, Optional, Tuple, Dict, Set, Union, Any
 from dataclasses import dataclass
-
-# Gate names that carry an inherently non-Pauli Z-diagonal phase (T/T-dagger, S/S-dagger).
-# ZPhase is handled separately below since its Pauli-ness depends on the phase value.
-_Z_DIAG_PHASE_NAMES = frozenset({'T', 'S'})
-
-
-def _is_non_pauli_phase(phase: FractionLike) -> bool:
-    """True iff `phase` (in units of pi) is not an integer multiple of pi, i.e. not a Pauli."""
-    if isinstance(phase, Fraction):
-        return phase.denominator != 1
-    return float(phase) % 1.0 != 0.0
-
-
-def is_expensive_misplaced_phase(gate_name: str, phase: FractionLike, state: int) -> bool:
-    """Shared classifier: is a phase gate expensive given the qubit's flavor `state`?
-
-    state: 0 = R', 1 = R (same convention as CostAccumulator.record_cnot/record_cz).
-
-    Z-diagonal non-Pauli phases (T, S, T-dagger, S-dagger, or a ZPhase gate with a
-    non-integer phase) are expensive on R' (state == 0); X-diagonal non-Pauli phases
-    (XPhase with a non-integer phase) are expensive on R (state == 1). Paulis are
-    always free. This mirrors SigmaTracker's _is_z_diagonal_expensive and the XPhase
-    branch of CircuitStructure._analyze (pyzx.sigma_tracker)
-    so the two cost models cannot silently diverge.
-    """
-    if gate_name in _Z_DIAG_PHASE_NAMES or (gate_name == 'ZPhase' and _is_non_pauli_phase(phase)):
-        return state == 0
-    if gate_name == 'XPhase' and _is_non_pauli_phase(phase):
-        return state == 1
-    return False
 
 
 class CostAccumulator:
@@ -2441,17 +2412,15 @@ def count_cz_faults(circuit: 'Circuit', final_states: List[int], verbose: bool =
             print(d)
     return {'bad': bad, 'safe': safe, 'total': bad + safe}
 
-# Gate names that carry a phase relevant to is_expensive_misplaced_phase.
-_PHASE_GATE_NAMES = frozenset({'ZPhase', 'XPhase', 'T', 'S'})
-
 def count_phase_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, int]:
     """Count expensive misplaced Z/X-diagonal phases in a circuit given final qubit states.
 
     Loops backwards through the circuit. HAD toggles a qubit's state. All other
     gates are ignored except phase gates (ZPhase, XPhase, T, S), which are
-    classified via the shared is_expensive_misplaced_phase predicate -- the
-    same one used by CostAccumulator.record_phase, so this matches what
-    SigmaTracker (pyzx.sigma_tracker) counts as MSD.
+    classified via the shared is_expensive_misplaced_phase predicate
+    (pyzx.tetrahedral_cost) -- the same one used by CostAccumulator.record_phase
+    and by SigmaTracker (pyzx.sigma_tracker), so this matches what SigmaTracker
+    counts as MSD.
 
     Args:
         circuit: The circuit to analyze.
