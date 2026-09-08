@@ -6,6 +6,8 @@ independently, then tests their interaction.
 
 from __future__ import annotations
 
+import random
+
 import pytest
 import pyzx as zx
 from pyzx.circuit.gates import S as SGate
@@ -394,3 +396,133 @@ class TestEdgeCases:
         s = t.summary()
         assert "MSD" in s
         assert "R'" in s
+
+
+# ===================================================================
+# Pareto frontier (weight-free) over initial assignments
+# ===================================================================
+
+
+_RANDOM_GATE_TYPES_1Q = ["H", "T", "T*", "S", "S*", "Z", "X"]
+_RANDOM_GATE_TYPES_2Q = ["CNOT", "CZ"]
+
+
+def _random_gate_list(
+    n_qubits: int, n_gates: int, rng: random.Random
+) -> list[tuple[str, int] | tuple[str, int, int]]:
+    """Random mix of 1- and 2-qubit gates, using make_circuit's vocabulary."""
+    gate_list: list[tuple[str, int] | tuple[str, int, int]] = []
+    for _ in range(n_gates):
+        if n_qubits >= 2 and rng.random() < 0.4:
+            kind = rng.choice(_RANDOM_GATE_TYPES_2Q)
+            a, b = rng.sample(range(n_qubits), 2)
+            gate_list.append((kind, a, b))
+        else:
+            kind = rng.choice(_RANDOM_GATE_TYPES_1Q)
+            q = rng.randrange(n_qubits)
+            gate_list.append((kind, q))
+    return gate_list
+
+
+def _all_assignment_points(tracker: SigmaTracker) -> list[tuple[int, int]]:
+    """Oracle: (rr, msd) for every one of the 2^n assignments, computed via
+    the already-tested single-assignment path (set_assignment + propagate),
+    independent of pareto_assignments()'s internal fast loop.
+    """
+    n = tracker.n_qubits
+    points = []
+    for bits in range(1 << n):
+        assignment = [Flavor((bits >> i) & 1) for i in range(n)]
+        tracker.set_assignment(assignment).propagate()
+        points.append((tracker.round_robin_count, tracker.msd_count))
+    return points
+
+
+def _dominates(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """True iff point a dominates point b: a <= b componentwise, strictly in
+    at least one component.
+    """
+    return a[0] <= b[0] and a[1] <= b[1] and (a[0] < b[0] or a[1] < b[1])
+
+
+def _naive_pareto_corners(points: list[tuple[int, int]]) -> set[tuple[int, int]]:
+    """Naive O(k^2) pairwise-dominance oracle over distinct (rr, msd) points."""
+    distinct = set(points)
+    return {p for p in distinct if not any(_dominates(q, p) for q in distinct if q != p)}
+
+
+class TestParetoAssignments:
+    """Exact, weight-free Pareto frontier over the 2^n initial assignments."""
+
+    def test_matches_naive_dominance_filter(self) -> None:
+        rng = random.Random(1234)
+        for _trial in range(15):
+            n = rng.randint(1, 10)
+            n_gates = rng.randint(0, 20)
+            c = make_circuit(n, _random_gate_list(n, n_gates, rng))
+            t = SigmaTracker(c)
+
+            frontier = t.pareto_assignments()
+            frontier_corners = {(rr, msd) for _, rr, msd in frontier}
+
+            naive_corners = _naive_pareto_corners(_all_assignment_points(t))
+
+            assert frontier_corners == naive_corners
+
+    def test_frontier_points_are_achievable(self) -> None:
+        rng = random.Random(5678)
+        for _trial in range(10):
+            n = rng.randint(1, 8)
+            n_gates = rng.randint(0, 20)
+            c = make_circuit(n, _random_gate_list(n, n_gates, rng))
+            t = SigmaTracker(c)
+
+            for assignment, rr, msd in t.pareto_assignments():
+                t.set_assignment(assignment).propagate()
+                assert t.round_robin_count == rr
+                assert t.msd_count == msd
+
+    def test_weighted_argmin_lies_on_frontier(self) -> None:
+        # Continuous, strictly-positive weights avoid degenerate ties: any
+        # global minimizer of w_rr*rr + w_msd*msd is Pareto-optimal (if it
+        # were dominated by another achievable point, that point would have
+        # strictly lower weighted cost, contradicting minimality), so its
+        # (rr, msd) must not be dominated by any frontier point.
+        rng = random.Random(91)
+        for _trial in range(8):
+            n = rng.randint(1, 8)
+            n_gates = rng.randint(0, 20)
+            c = make_circuit(n, _random_gate_list(n, n_gates, rng))
+
+            frontier = SigmaTracker(c).pareto_assignments()
+
+            w_rr = rng.uniform(0.1, 5.0)
+            w_msd = rng.uniform(0.1, 5.0)
+            t = SigmaTracker(c, w_msd=w_msd, w_rr=w_rr)
+            t.optimize_assignment()
+            point = (t.round_robin_count, t.msd_count)
+
+            assert not any(_dominates((frr, fmsd), point) for _, frr, fmsd in frontier)
+
+    def test_frontier_is_a_proper_staircase(self) -> None:
+        rng = random.Random(2026)
+        for _trial in range(10):
+            n = rng.randint(1, 8)
+            n_gates = rng.randint(0, 20)
+            c = make_circuit(n, _random_gate_list(n, n_gates, rng))
+            t = SigmaTracker(c)
+
+            frontier = t.pareto_assignments()
+            rrs = [rr for _, rr, _ in frontier]
+            msds = [msd for _, _, msd in frontier]
+
+            assert rrs == sorted(rrs)
+            assert len(set(rrs)) == len(rrs)
+            assert len(set(msds)) == len(msds)
+            assert all(msds[i] > msds[i + 1] for i in range(len(msds) - 1))
+
+    def test_rejects_large_n(self) -> None:
+        c = zx.Circuit(25)
+        t = SigmaTracker(c)
+        with pytest.raises(ValueError, match="infeasible"):
+            t.pareto_assignments()

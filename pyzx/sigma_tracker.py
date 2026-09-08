@@ -471,6 +471,92 @@ class SigmaTracker:
         self.set_assignment(best_assignment).propagate()
         return best_assignment, best_cost
 
+    def pareto_assignments(self) -> list[tuple[list[Flavor], int, int]]:
+        """Compute the exact, weight-free Pareto frontier over all 2^n initial
+        assignments in the (round_robin_count, msd_count) space.
+
+        Assignment `a` dominates `b` iff `rr_a <= rr_b` and `msd_a <= msd_b`,
+        with at least one strict inequality. Every one of the 2^n assignments
+        is actually evaluated, so the returned frontier is exact -- dominance
+        needs no weights.
+
+        Uses the skyline algorithm below rather than a naive O(4^n) pairwise
+        dominance filter:
+          1. Enumerate all 2^n bit patterns, computing (rr, msd) via the same
+             fast inner loop as _optimize_brute_force (iterate the
+             precomputed structure.potential_costs, testing expensive_if).
+          2. Dedupe per distinct rr, keeping only the minimum-msd
+             representative (any tie-break on bits is fine -- every other
+             point at that rr is dominated by it).
+          3. Sort the survivors by rr ascending.
+          4. Sweep once with running_min_msd = +inf, keeping a point iff its
+             msd is strictly less than running_min_msd (a point whose msd
+             equals the running min is dominated by an earlier, smaller-rr
+             point), then updating running_min_msd.
+
+        Complexity: O(2^n * |potential_costs| + 2^n log 2^n). Only feasible
+        for n <= 24 (same guard as _optimize_brute_force).
+
+        Returns:
+        -------
+        List of (assignment, rr_count, msd_count), sorted by rr_count
+        ascending (equivalently msd_count descending) -- a proper staircase:
+        no two entries share an rr_count or an msd_count.
+        """
+        n = self.n_qubits
+        if n > 24:
+            msg = (
+                f"Brute-force over {n} qubits (2^{n} = {2**n:,} assignments) "
+                f"is infeasible.  Consider a heuristic method."
+            )
+            raise ValueError(msg)
+
+        potential_costs = self.structure.potential_costs
+
+        # Step 1: enumerate all 2^n points as (rr, msd, bits).
+        points: list[tuple[int, int, int]] = []
+        for bits in range(1 << n):
+            rr = 0
+            msd = 0
+            for pc in potential_costs:
+                triggered = True
+                for q, required in pc.expensive_if.items():
+                    if ((bits >> q) & 1) != required:
+                        triggered = False
+                        break
+                if triggered:
+                    if pc.cost_type == CostType.MSD:
+                        msd += 1
+                    else:
+                        rr += 1
+            points.append((rr, msd, bits))
+
+        # Step 2: dedupe per rr, keeping the minimum-msd representative.
+        best_for_rr: dict[int, tuple[int, int]] = {}  # rr -> (msd, bits)
+        for rr, msd, bits in points:
+            current = best_for_rr.get(rr)
+            if current is None or msd < current[0]:
+                best_for_rr[rr] = (msd, bits)
+
+        # Step 3: sort survivors by rr ascending.
+        survivors = sorted(
+            (rr, msd, bits) for rr, (msd, bits) in best_for_rr.items()
+        )
+
+        # Step 4: sweep, keeping only strictly-decreasing msd.
+        frontier: list[tuple[int, int, int]] = []
+        running_min_msd = float("inf")
+        for rr, msd, bits in survivors:
+            if msd < running_min_msd:
+                frontier.append((rr, msd, bits))
+                running_min_msd = msd
+
+        # Step 5: decode bits into assignments.
+        return [
+            ([Flavor((bits >> i) & 1) for i in range(n)], rr, msd)
+            for rr, msd, bits in frontier
+        ]
+
     # -------------------------------------------------------------------
     # Reporting
     # -------------------------------------------------------------------
