@@ -36,13 +36,13 @@ SEED = 1337
 
 def _reference_cost_forward(circuit: Circuit, initial_assignment: List[int]) -> Tuple[int, int]:
     """Independent forward-walk reference, following the *documented* R/R'
-    semantics of mqt.qecc.tetrahedral_synthesis.sigma_tracker (its module
+    semantics of pyzx.sigma_tracker (its module
     docstring / CircuitStructure._analyze comments): CNOT bad iff
     control=R'(0) & target=R(1); CZ bad iff both R'(0); phases classified via
     the shared is_expensive_misplaced_phase predicate. Walks forward from
     initial_assignment (state before circuit.gates[0]), toggling on HAD.
 
-    NOTE: as of this writing, the actually-installed SigmaTracker's
+    NOTE: as of this writing, pyzx.sigma_tracker.SigmaTracker's
     CircuitStructure._analyze has a confirmed bug that inverts all four of
     these classifications relative to its own docstring (verified with
     trivial one/two-qubit circuits: e.g. a lone CNOT(0,1) with
@@ -52,7 +52,7 @@ def _reference_cost_forward(circuit: Circuit, initial_assignment: List[int]) -> 
     check extraction's backward-pass counters (count_cnot_faults/
     count_cz_faults/count_phase_faults) against an independently written
     forward pass, using the documented semantics both sides agree should
-    hold. The real SigmaTracker bug should be fixed upstream in mqt-qecc
+    hold. The real SigmaTracker bug should be fixed in pyzx.sigma_tracker
     separately.
 
     Returns (round_robin_count, msd_count).
@@ -145,7 +145,7 @@ class TestForwardBackwardReconciliation(unittest.TestCase):
 
     This is intentionally not a reconciliation against the real, installed
     SigmaTracker: see _reference_cost_forward's docstring for the confirmed bug
-    in mqt.qecc.tetrahedral_synthesis.sigma_tracker.CircuitStructure._analyze
+    in pyzx.sigma_tracker.CircuitStructure._analyze
     that inverts its CNOT/CZ/phase classifications relative to its own
     docstring, which currently makes such a comparison meaningless.
     """

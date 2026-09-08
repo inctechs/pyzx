@@ -54,7 +54,7 @@ def is_expensive_misplaced_phase(gate_name: str, phase: FractionLike, state: int
     non-integer phase) are expensive on R' (state == 0); X-diagonal non-Pauli phases
     (XPhase with a non-integer phase) are expensive on R (state == 1). Paulis are
     always free. This mirrors SigmaTracker's _is_z_diagonal_expensive and the XPhase
-    branch of CircuitStructure._analyze (mqt.qecc.tetrahedral_synthesis.sigma_tracker)
+    branch of CircuitStructure._analyze (pyzx.sigma_tracker)
     so the two cost models cannot silently diverge.
     """
     if gate_name in _Z_DIAG_PHASE_NAMES or (gate_name == 'ZPhase' and _is_non_pauli_phase(phase)):
@@ -2451,7 +2451,7 @@ def count_phase_faults(circuit: 'Circuit', final_states: List[int], verbose: boo
     gates are ignored except phase gates (ZPhase, XPhase, T, S), which are
     classified via the shared is_expensive_misplaced_phase predicate -- the
     same one used by CostAccumulator.record_phase, so this matches what
-    SigmaTracker (mqt.qecc.tetrahedral_synthesis.sigma_tracker) counts as MSD.
+    SigmaTracker (pyzx.sigma_tracker) counts as MSD.
 
     Args:
         circuit: The circuit to analyze.

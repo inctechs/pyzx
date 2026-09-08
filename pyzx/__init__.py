@@ -35,6 +35,7 @@ from . import generate
 from . import todd
 from . import linalg
 from . import extract
+from . import sigma_tracker
 from .rewrite_rules import *
 from . import optimize
 from . import simplify
