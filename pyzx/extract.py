@@ -15,22 +15,99 @@
 # limitations under the License.
 
 __all__ = ['extract_circuit', 'extract_simple', 'graph_to_swaps', 'extract_clifford_normal_form',
-           'lookahead_extract_base', 'lookahead_full', 'lookahead_fast', 'lookahead_extract']
+           'lookahead_extract_base', 'lookahead_full', 'lookahead_fast', 'lookahead_extract', 'multi_restart_extract']
 
 from fractions import Fraction
-import itertools
 from typing_extensions import deprecated
 
-from .utils import EdgeType, VertexType, toggle_edge
+from .utils import EdgeType, VertexType, FractionLike, toggle_edge
 from .linalg import Mat2, Z2
-from .simplify import id_simp, tcount, full_reduce, is_graph_like, pivot_simp
+from .simplify import id_simp, full_reduce, is_graph_like, pivot_simp
 from .rewrite_rules import *
 from .circuit import Circuit
-from .circuit.gates import Gate, ParityPhase, CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP, InitAncilla
+from .circuit.gates import CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP
+from .tetrahedral_cost import is_expensive_misplaced_phase, _PHASE_GATE_NAMES
+from .sigma_tracker import SigmaTracker
+import random
 
 from .graph.base import BaseGraph, VT, ET
 
-from typing import List, Optional, Tuple, Dict, Set, Union, Iterator
+from typing import List, Optional, Tuple, Dict, Set, Union, Any
+from dataclasses import dataclass
+
+
+class CostAccumulator:
+    """Mutable counter for bad gates during extraction simulation.
+
+    Passed into clean_frontier and apply_cnots via an optional parameter.
+    When None is passed instead, those functions behave identically to before.
+    """
+    __slots__ = ('w_cnot', 'w_cz', 'w_msd', 'bad_cnots', 'bad_czs', 'bad_phases')
+
+    def __init__(self, w_cnot: float = 1.0, w_cz: float = 1.0, w_msd: float = 1.0) -> None:
+        self.w_cnot = w_cnot
+        self.w_cz = w_cz
+        self.w_msd = w_msd
+        self.bad_cnots = 0
+        self.bad_czs = 0
+        self.bad_phases = 0
+
+    def record_cnot(self, control_state: int, target_state: int) -> None:
+        """Record a CNOT gate.  Bad when control=R'(0), target=R(1)."""
+        if control_state == 0 and target_state == 1:
+            self.bad_cnots += 1
+
+    def record_cz(self, state_a: int, state_b: int) -> None:
+        """Record a CZ gate.  Bad when both qubits are R'(0)."""
+        if state_a == 0 and state_b == 0:
+            self.bad_czs += 1
+
+    def record_phase(self, state: int, phase: FractionLike) -> None:
+        """Record a ZPhase gate emitted onto the frontier (clean_frontier always
+        emits phases as ZPhase). Bad when non-Pauli and the qubit is R'(0)."""
+        if is_expensive_misplaced_phase('ZPhase', phase, state):
+            self.bad_phases += 1
+
+    @property
+    def cost(self) -> float:
+        return self.w_cnot * self.bad_cnots + self.w_cz * self.bad_czs + self.w_msd * self.bad_phases
+
+
+@dataclass
+class ExtractionSnapshot:
+    """Complete extraction state at a decision point, for forking."""
+    graph: BaseGraph
+    circuit: Circuit
+    frontier: List
+    qubit_map: Dict
+    gadgets: Dict
+    current_states: List[int]
+ 
+    @staticmethod
+    def capture(
+        g: BaseGraph, c: Circuit, frontier: List, qubit_map: Dict,
+        gadgets: Dict, current_states: List[int],
+    ) -> 'ExtractionSnapshot':
+        """Capture current extraction state as an independent snapshot."""
+        return ExtractionSnapshot(
+            graph=g.clone(),
+            circuit=c.copy(),
+            frontier=list(frontier),
+            qubit_map=dict(qubit_map),
+            gadgets=dict(gadgets),
+            current_states=list(current_states),
+        )
+ 
+    def clone(self) -> 'ExtractionSnapshot':
+        """Create an independent deep copy of this snapshot."""
+        return ExtractionSnapshot(
+            graph=self.graph.clone(),
+            circuit=self.circuit.copy(),
+            frontier=list(self.frontier),
+            qubit_map=dict(self.qubit_map),
+            gadgets=dict(self.gadgets),
+            current_states=list(self.current_states),
+        )
 
 
 def bi_adj(g: BaseGraph[VT,ET], vs:List[VT], ws:List[VT]) -> Mat2:
@@ -200,36 +277,74 @@ def find_minimal_sums(m: Mat2, reversed_search=False) -> Optional[Tuple[int, ...
         combs = combs2
 
 
-def greedy_reduction(m: Mat2) -> Optional[List[Tuple[int, int]]]:
+def greedy_reduction(m: Mat2, states: Optional[List[int]] = None, threshold: int = 0, rng: Optional[random.Random] = None) -> Optional[List[Tuple[int, int]]]:
     """Returns a list of tuples (r1,r2) that specify which row should be added to which other row
-    in order to reduce one row of m to only contain a single 1. 
-    Used in :func:`extract_circuit` and :func:`lookahead_extract_base`"""
+    in order to reduce one row of m to only contain a single 1.
+    Used in :func:`extract_circuit` and :func:`lookahead_extract_base`.
+
+    If states is provided, prefers fault-tolerant CNOTs (avoids control=|0>, target=|1>).
+    threshold: accept a safe CNOT even if it reduces up to `threshold` fewer 1s than
+    the best available reduction. Only has effect when states is provided and the best
+    candidate is a bad CNOT.
+    rng: if provided, randomly selects among safe candidates within the threshold
+    instead of always picking the best one. Used for multi-restart optimization."""
     indicest = find_minimal_sums(m)
     if indicest is None: return indicest
     indices = list(indicest)
-    rows = {i:m.data[i] for i in indices}
+    rows = {i: m.data[i] for i in indices}
     weights: Dict[int,int] = {i: sum(r) for i,r in rows.items()}
     result = []
-    while len(indices)>1:
-        best = (-1,-1)
+    while len(indices) > 1:
+        best = (-1, -1)
+        best_is_bad = True
         reduction = -10000
+        best_safe = (-1, -1)
+        safe_candidates: List[Tuple[Tuple[int, int], int]] = []  # [(candidate, reduction), ...]
         for i in indices:
             for j in indices:
                 if j <= i: continue
-                w = sum(xor_rows(rows[i],rows[j]))
-                if weights[i] - w > reduction:
-                    best = (j,i) # "Add row j to i"
-                    reduction = weights[i] - w
-                if weights[j] - w > reduction:
-                    best = (i,j)
-                    reduction = weights[j] - w
-        result.append(best)
-        control, target = best
-        rows[target] = xor_rows(rows[control],rows[target])
-        weights[target] = weights[target] - reduction
+                w = sum(xor_rows(rows[i], rows[j]))
+                # Option A: add j to i which later translates to (control=j, target=i)
+                # NOTE: row addition according to Z parity, hence adding row j to i results
+                # in CNOT with control i and target j
+                red_A = weights[i] - w
+                bad_A = (states is not None and states[i] == 0 and states[j] == 1)
+                # Option B: add i to j which later translates to (control=i, target=j)
+                red_B = weights[j] - w
+                bad_B = (states is not None and states[j] == 0 and states[i] == 1)
+                for (red, bad, candidate) in [(red_A, bad_A, (j,i)), (red_B, bad_B, (i,j))]:
+                    if red > reduction:
+                        best = candidate
+                        reduction = red
+                        best_is_bad = bad
+                    elif red == reduction and best_is_bad and not bad:
+                        best = candidate
+                        best_is_bad = False
+                    if not bad:
+                        safe_candidates.append((candidate, red))
+
+        if states is not None and best_is_bad and safe_candidates:
+            # Filter to candidates within threshold of the best reduction
+            viable = [(c, r) for c, r in safe_candidates if r >= reduction - threshold]
+            if viable:
+                if rng is not None and len(viable) > 1:
+                    chosen, chosen_reduction = rng.choice(viable)
+                else:
+                    # Deterministic: pick the one with highest reduction (original behavior)
+                    chosen, chosen_reduction = max(viable, key=lambda x: x[1])
+            else:
+                chosen = best
+                chosen_reduction = reduction
+        else:
+            chosen = best
+            chosen_reduction = reduction
+
+        result.append(chosen)
+        control, target = chosen
+        rows[target] = xor_rows(rows[control], rows[target])
+        weights[target] = weights[target] - chosen_reduction
         indices.remove(control)
     return result
-
 
 def flat_indices(m: Mat2, indices: List[int]) -> Tuple[List[Tuple[int, int]], int]:
     """Given a matrix and a list of row indices that have to be added together,
@@ -452,7 +567,8 @@ def remove_extra_cnots(cnots_to_apply: List[CNOT], mat: Mat2) -> List[CNOT]:
 
 
 def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map: Dict[VT, int],
-                cnots: List[CNOT], m: Mat2, neighbors: List[VT]) -> int:
+                    cnots: List[CNOT], m: Mat2, neighbors: List[VT], current_states: Optional[List[int]] = None,
+                    cost_acc: Optional[CostAccumulator] = None) -> int:
     """Adds the list of CNOTs to the circuit, modifying the graph, frontier, and qubit map as needed.
     Returns the number of vertices that end up being extracted"""
     if len(cnots) > 0:
@@ -484,15 +600,21 @@ def apply_cnots(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT], qubit_map:
         frontier.append(w)
 
     for cnot in cnots:
+        if cost_acc is not None and current_states is not None:
+            cost_acc.record_cnot(current_states[cnot.control], current_states[cnot.target])
         c.add_gate(cnot)
     for h in hads:
         c.add_gate("HAD", h)
+        if current_states is not None:
+            current_states[h] = 1 - current_states[h]
 
     return len(good_verts)
 
 
 def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
-                   qubit_map: Dict[VT, int], optimize_czs: bool = True) -> int:
+                       qubit_map: Dict[VT, int], optimize_czs: bool = True,
+                       current_states: Optional[List[int]] = None,
+                       cost_acc: Optional[CostAccumulator] = None) -> int:
     """Remove single qubit gates from the frontier and any CZs between the vertices in the frontier
     Returns the number of CZs saved if `optimize_czs` is True; otherwise returns 0"""
     phases = g.phases()
@@ -505,8 +627,15 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
         if g.edge_type(e) == EdgeType.HADAMARD:
             c.add_gate("HAD", q)
             g.set_edge_type(e, EdgeType.SIMPLE)
+            # UPDATE STATE: Toggle 0 <-> 1
+            if current_states is not None:
+                # Assuming H toggles the state (Up (1) <-> Down (0))
+                current_states[qubit_map[v]] = 1 - current_states[qubit_map[v]]
         if phases[v]:
             c.add_gate("ZPhase", q, phases[v])
+            if cost_acc is not None and current_states is not None:
+                # current_states[q] is already post-HAD-toggle (emission-time) state.
+                cost_acc.record_phase(current_states[q], phases[v])
             g.set_phase(v, 0)
     # And now on to CZ gates
     cz_mat = Mat2([[0 for i in range(len(outputs))] for j in range(len(outputs))])
@@ -519,23 +648,94 @@ def clean_frontier(g: BaseGraph[VT, ET], c: Circuit, frontier: List[VT],
 
     if optimize_czs:
         overlap_data = max_overlap(cz_mat)
-        while len(overlap_data[1]) > 2:  # there are enough common qubits to be worth optimizing
+        while len(overlap_data[1]) > 2:
             i, j = overlap_data[0][0], overlap_data[0][1]
-            czs_saved += len(overlap_data[1]) - 2
-            c.add_gate("CNOT", i, j)
-            for qb in overlap_data[1]:
-                c.add_gate("CZ", j, qb)
-                cz_mat.data[i][qb] = 0
-                cz_mat.data[j][qb] = 0
-                cz_mat.data[qb][i] = 0
-                cz_mat.data[qb][j] = 0
-            c.add_gate("CNOT", i, j)
+            common = overlap_data[1]
+
+            if current_states is not None:
+                # ── Flavor-aware conjugation decision ──
+                #
+                # The rewrite replaces CZ(i,k)+CZ(j,k) for each shared k
+                # with CNOT(ctrl,tgt) + CZ(keeper,k) + CNOT(ctrl,tgt).
+                #
+                # Direction A: i is absorbed, j keeps CZs, CNOT(i→j)
+                #   improvement = (bad CZs eliminated on row i) − 2×(CNOT(i,j) is bad)
+                #
+                # Direction B: j is absorbed, i keeps CZs, CNOT(j→i)
+                #   improvement = (bad CZs eliminated on row j) − 2×(CNOT(j,i) is bad)
+
+                # Count bad CZs on each row among the shared targets
+                # Bad CZ: both qubits in state 0 (R')
+                si, sj = current_states[i], current_states[j]
+                bad_czs_i = sum(1 for k in common if si == 0 and current_states[k] == 0)
+                bad_czs_j = sum(1 for k in common if sj == 0 and current_states[k] == 0)
+
+                # Bad CNOT: control=0(R'), target=1(R)
+                bad_cnot_ij = 1 if (si == 0 and sj == 1) else 0  # CNOT(i→j)
+                bad_cnot_ji = 1 if (sj == 0 and si == 1) else 0  # CNOT(j→i)
+
+                improvement_a = bad_czs_i - 2 * bad_cnot_ij
+                improvement_b = bad_czs_j - 2 * bad_cnot_ji
+
+                if improvement_a >= improvement_b:
+                    best_improvement = improvement_a
+                    # j keeps CZs, CNOT control=i target=j
+                    keeper, absorbed = j, i
+                else:
+                    best_improvement = improvement_b
+                    # i keeps CZs, CNOT control=j target=i
+                    keeper, absorbed = i, j
+
+                if best_improvement < 0:
+                    # Conjugation worsens bad-gate count — skip entirely.
+                    # max_overlap always returns the same best pair, so
+                    # no other pair can do better (fewer shared targets
+                    # means less CZ savings against the same 2-CNOT cost).
+                    break
+
+                # Apply conjugation in the chosen direction
+                czs_saved += len(common) - 2
+                c.add_gate("CNOT", absorbed, keeper)
+                if cost_acc is not None:
+                    cost_acc.record_cnot(current_states[absorbed], current_states[keeper])
+                for qb in common:
+                    c.add_gate("CZ", keeper, qb)
+                    if cost_acc is not None:
+                        cost_acc.record_cz(current_states[keeper], current_states[qb])
+                    cz_mat.data[i][qb] = 0
+                    cz_mat.data[j][qb] = 0
+                    cz_mat.data[qb][i] = 0
+                    cz_mat.data[qb][j] = 0
+                c.add_gate("CNOT", absorbed, keeper)
+                if cost_acc is not None:
+                    cost_acc.record_cnot(current_states[absorbed], current_states[keeper])
+
+            else:
+                # ── Original behavior (no flavor awareness) ──
+                czs_saved += len(common) - 2
+                c.add_gate("CNOT", i, j)
+                if cost_acc is not None and current_states is not None:
+                    cost_acc.record_cnot(current_states[i], current_states[j])
+                for qb in common:
+                    c.add_gate("CZ", j, qb)
+                    if cost_acc is not None and current_states is not None:
+                        cost_acc.record_cz(current_states[j], current_states[qb])
+                    cz_mat.data[i][qb] = 0
+                    cz_mat.data[j][qb] = 0
+                    cz_mat.data[qb][i] = 0
+                    cz_mat.data[qb][j] = 0
+                c.add_gate("CNOT", i, j)
+                if cost_acc is not None and current_states is not None:
+                    cost_acc.record_cnot(current_states[i], current_states[j])
+
             overlap_data = max_overlap(cz_mat)
 
     for i in range(len(outputs)):
         for j in range(i + 1, len(outputs)):
             if cz_mat.data[i][j] == 1:
                 c.add_gate("CZ", i, j)
+                if cost_acc is not None and current_states is not None:
+                    cost_acc.record_cz(current_states[i], current_states[j])
 
     return czs_saved
 
@@ -592,15 +792,470 @@ def remove_gadget(g: BaseGraph[VT, ET], frontier: List[VT], qubit_map: Dict[VT, 
                 break
     return removed_gadget
 
+def _generate_cnot_alternatives(
+    m: Mat2,
+    frontier_states: Optional[List[int]],
+    threshold_range: List[int],
+    n_random: int = 0,
+    rng_seed: Optional[int] = None,
+) -> List[List[Tuple[int, int]]]:
+    """Generate deduplicated CNOT operation alternatives for lookahead evaluation.
+ 
+    Uses multiple algorithmic approaches (greedy, flat-greedy, two-reduction)
+    plus randomized variants to maximize the diversity of structurally distinct
+    extraction paths.
+ 
+    Returns a list of greedy_reduction-format operation lists, deduplicated
+    by extractable-row-set.
+ 
+    Parameters
+    ----------
+    m : Mat2
+        Biadjacency matrix at the decision point.  NOT modified.
+    frontier_states : list of int or None
+        Flavor state per frontier row (0=R', 1=R).
+    threshold_range : list of int
+        Thresholds to test for flavor-aware greedy (e.g., [0, 1, 2]).
+    n_random : int
+        Number of randomized greedy_reduction calls per threshold.
+        Total randomized calls = n_random * len(threshold_range).
+    rng_seed : int or None
+        Base seed for reproducibility of randomized alternatives.
+    """
+    import random as _random
+ 
+    # ── Helper: compute extractable rows and bad-CNOT count for an op list ──
+    def _evaluate_ops(ops):
+        """Returns (extractable_rows frozenset, bad_cnot_count)."""
+        m_after = Mat2([row[:] for row in m.data])
+        for ctrl, tgt in ops:
+            m_after.data[tgt] = xor_rows(m_after.data[ctrl], m_after.data[tgt])
+        ext_rows = frozenset(
+            i for i, row in enumerate(m_after.data) if sum(row) == 1
+        )
+ 
+        bad = 0
+        if frontier_states is not None:
+            for c_g, t_g in ops:
+                # Convention: greedy returns (control_row, target_row).
+                # Circuit CNOT: CNOT(control=target_row, target=control_row).
+                # Bad when circuit control=R'(0) and circuit target=R(1).
+                if frontier_states[t_g] == 0 and frontier_states[c_g] == 1:
+                    bad += 1
+ 
+        return ext_rows, bad
+ 
+    # # Group by extractable rows → keep best (fewest bad) per group.
+    # # Same extractable rows = same downstream frontier evolution,
+    # # so only the immediate CNOT cost differs → pick lowest cost.
+    # by_extraction: Dict[FrozenSet[int], Tuple[List[Tuple[int, int]], int]] = {}
+    #
+    # def _record(ops):
+    #     """Record an alternative, deduplicating by extractable rows."""
+    #     if ops is None:
+    #         return
+    #     ext_rows, bad = _evaluate_ops(ops)
+    #     if not ext_rows:
+    #         return  # No extractable rows — invalid
+    #     if ext_rows not in by_extraction or bad < by_extraction[ext_rows][1]:
+    #         by_extraction[ext_rows] = (ops, bad)
+
+    seen_ops: Dict[Tuple[Tuple[int, int], ...], None] = {}
+
+    def _record(ops):
+        if ops is None:
+            return
+        ops_key = tuple(ops)
+        if ops_key not in seen_ops:
+            seen_ops[ops_key] = None
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 1: Vanilla greedy (no flavor awareness)
+    # Finds: forward-search minimal sum, greedy pairwise ordering
+    # ═══════════════════════════════════════════════════════════════
+    m_copy = Mat2([row[:] for row in m.data])
+    _record(greedy_reduction(m_copy, states=None, threshold=0))
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 2: Flavor-aware greedy at each threshold (deterministic)
+    # Same row subset as vanilla, but different pairwise ordering
+    # when bad CNOTs trigger substitution
+    # ═══════════════════════════════════════════════════════════════
+    if frontier_states is not None:
+        for t in threshold_range:
+            m_copy = Mat2([row[:] for row in m.data])
+            _record(greedy_reduction(m_copy, states=list(frontier_states), threshold=t))
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 3: Flat greedy (REVERSED search direction)
+    # Uses find_minimal_sums(m, reversed_search=True), which searches
+    # row combinations starting from the highest indices.  Often finds
+    # a DIFFERENT row subset than the forward search.
+    # Uses flat_indices for log-depth CNOT ordering.
+    # ═══════════════════════════════════════════════════════════════
+    m_copy = Mat2([row[:] for row in m.data])
+    _record(greedy_reduction_flat(m_copy))
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 4: Two-reduction (simultaneous double extraction)
+    # Uses find_2_minimal_sums which finds two rows that can be
+    # independently reduced to weight 1.  Completely different
+    # algorithmic approach — may extract different vertices.
+    # ═══════════════════════════════════════════════════════════════
+    m_copy = Mat2([row[:] for row in m.data])
+    _record(greedy_two_reduction(m_copy))
+ 
+    # ═══════════════════════════════════════════════════════════════
+    # SOURCE 5: Randomized greedy (flavor-aware + random tie-breaking)
+    # Each RNG seed explores different tie-breaking decisions within
+    # greedy_reduction's inner loop.
+    # ═══════════════════════════════════════════════════════════════
+    if n_random > 0 and frontier_states is not None:
+        base_rng = _random.Random(rng_seed if rng_seed is not None else 12345)
+        for _i in range(n_random):
+            for t in threshold_range:
+                seed_i = base_rng.randint(0, 2**32 - 1)
+                trial_rng = _random.Random(seed_i)
+                m_copy = Mat2([row[:] for row in m.data])
+                _record(greedy_reduction(
+                    m_copy, states=list(frontier_states),
+                    threshold=t, rng=trial_rng,
+                ))
+ 
+    # return [ops for ops, _bad in by_extraction.values()]
+    return [list(ops_key) for ops_key in seen_ops]
+
+# def _generate_cnot_alternatives(
+#     m: Mat2,
+#     frontier_states: Optional[List[int]],
+#     threshold_range: List[int],
+#     n_random: int = 0,
+#     rng_seed: Optional[int] = None,
+# ) -> List[List[Tuple[int, int]]]:
+#     """Generate deduplicated CNOT operation alternatives for lookahead evaluation.
+#
+#     Returns a list of greedy_reduction operation lists (row-index pairs),
+#     deduplicated by extractable-row-set.  For alternatives sharing the
+#     same extractable rows, keeps the one with fewest bad CNOTs.
+#
+#     Parameters
+#     ----------
+#     m : Mat2
+#         Biadjacency matrix at the decision point.  NOT modified.
+#     frontier_states : list of int or None
+#         Flavor state per frontier row (0=R', 1=R).
+#     threshold_range : list of int
+#         Thresholds to test deterministically (e.g., [0, 1, 2]).
+#     n_random : int
+#         Number of randomized greedy_reduction calls to add.
+#         Each uses a different RNG seed and explores different tie-breaking
+#         within greedy_reduction.  Uses each threshold in threshold_range,
+#         so total randomized calls = n_random * len(threshold_range).
+#     rng_seed : int or None
+#         Base seed for reproducibility of randomized alternatives.
+#
+#     Returns
+#     -------
+#     list of list of (int, int)
+#         Each inner list is a greedy_reduction output: [(control, target), ...].
+#     """
+#     import random as _random
+#
+#     # ── Helper: evaluate one greedy_reduction call ──
+#     def _eval_one(states_arg, thresh, rng_arg):
+#         m_copy = Mat2([row[:] for row in m.data])
+#         ops = greedy_reduction(m_copy, states=states_arg, threshold=thresh, rng=rng_arg)
+#         if ops is None:
+#             return None, None, None
+#
+#         # Apply ops to find extractable rows
+#         m_after = Mat2([row[:] for row in m.data])
+#         for ctrl, tgt in ops:
+#             m_after.data[tgt] = xor_rows(m_after.data[ctrl], m_after.data[tgt])
+#         ext_rows = frozenset(
+#             i for i, row in enumerate(m_after.data) if sum(row) == 1
+#         )
+#
+#         # Count bad CNOTs
+#         bad = 0
+#         if frontier_states is not None:
+#             for c_g, t_g in ops:
+#                 if frontier_states[t_g] == 0 and frontier_states[c_g] == 1:
+#                     bad += 1
+#
+#         return ops, ext_rows, bad
+#
+#     # Group by extractable rows → keep best (fewest bad) per group
+#     by_extraction: Dict[FrozenSet[int], Tuple[List[Tuple[int, int]], int]] = {}
+#
+#     def _record(ops, ext_rows, bad):
+#         if ext_rows not in by_extraction or bad < by_extraction[ext_rows][1]:
+#             by_extraction[ext_rows] = (ops, bad)
+#
+#     # ── Deterministic alternatives ──
+#
+#     # 1. Vanilla (no flavor awareness)
+#     ops, ext_rows, bad = _eval_one(None, 0, None)
+#     if ops is not None:
+#         _record(ops, ext_rows, bad)
+#
+#     # 2. Flavor-aware at each threshold, deterministic
+#     if frontier_states is not None:
+#         for t in threshold_range:
+#             ops, ext_rows, bad = _eval_one(list(frontier_states), t, None)
+#             if ops is not None:
+#                 _record(ops, ext_rows, bad)
+#
+#     # ── Randomized alternatives ──
+#     # Each uses a different RNG seed to explore different tie-breaking
+#     # decisions within greedy_reduction's inner loop.  We test each
+#     # threshold to explore different substitution aggressiveness levels.
+#     if n_random > 0 and frontier_states is not None:
+#         base_rng = _random.Random(rng_seed if rng_seed is not None else 12345)
+#         for i in range(n_random):
+#             for t in threshold_range:
+#                 seed_i = base_rng.randint(0, 2**32 - 1)
+#                 trial_rng = _random.Random(seed_i)
+#                 ops, ext_rows, bad = _eval_one(list(frontier_states), t, trial_rng)
+#                 if ops is not None:
+#                     _record(ops, ext_rows, bad)
+#
+#     return [ops for ops, _bad in by_extraction.values()]
+
+def _has_bad_ops(
+    ops: List[Tuple[int, int]],
+    frontier_states: List[int],
+) -> bool:
+    """Check whether any operation in a greedy_reduction result is a bad CNOT."""
+    for c_g, t_g in ops:
+        # Same convention as _generate_cnot_alternatives
+        if frontier_states[t_g] == 0 and frontier_states[c_g] == 1:
+            return True
+    return False
+
+def _simulate_forward(
+    snapshot: ExtractionSnapshot,
+    initial_ops: List[Tuple[int, int]],
+    m_original: Mat2,
+    neighbors_original: List,
+    n_rounds: int,
+    optimize_czs: bool,
+    threshold: int,
+    w_cnot: float,
+    w_cz: float,
+    w_msd: float,
+) -> float:
+    """Simulate extraction forward from a snapshot, return cumulative bad-gate cost.
+
+    Parameters
+    ----------
+    snapshot : ExtractionSnapshot
+        State at the decision point.  Will be cloned internally.
+    initial_ops : list of (int, int)
+        greedy_reduction output to apply as the initial CNOT choice.
+    m_original : Mat2
+        Biadjacency matrix at the decision point.  Not modified.
+    neighbors_original : list
+        Neighbor vertices at the decision point.  Not modified.
+    n_rounds : int
+        Number of ADDITIONAL extraction rounds to simulate after applying
+        the initial choice (so total simulated rounds = 1 + n_rounds).
+    optimize_czs : bool
+        Passed to clean_frontier.
+    threshold : int
+        Threshold for greedy_reduction during simulation rounds.
+    w_cnot, w_cz, w_msd : float
+        Weights for the cost function.
+
+    Returns
+    -------
+    float
+        Cumulative weighted bad-gate cost over the simulated rounds.
+    """
+    snap = snapshot.clone()
+    g = snap.graph
+    c = snap.circuit
+    frontier = snap.frontier
+    qubit_map = snap.qubit_map
+    gadgets = snap.gadgets
+    current_states = snap.current_states
+
+    cost_acc = CostAccumulator(w_cnot, w_cz, w_msd)
+ 
+    # ── Round 0: apply the initial CNOT choice ──
+    # Copy m and neighbors (apply_cnots modifies m via row_add,
+    # and we must not touch the caller's originals)
+    m = Mat2([row[:] for row in m_original.data])
+    neighbors = list(neighbors_original)
+    cnots = [CNOT(target, control) for control, target in initial_ops]
+    apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors,
+                current_states=current_states, cost_acc=cost_acc)
+ 
+    # ── Rounds 1..n_rounds: continue extraction with greedy defaults ──
+    for _round in range(n_rounds):
+        clean_frontier(g, c, frontier, qubit_map, optimize_czs,
+                       current_states, cost_acc=cost_acc)
+ 
+        neighbor_set = neighbors_of_frontier(g, frontier)
+        if not frontier:
+            break
+ 
+        if remove_gadget(g, frontier, qubit_map, neighbor_set, gadgets):
+            # Gadget removed — this doesn't cost anything, but we consumed
+            # a loop iteration.  That's fine: the next iteration will
+            # process the actual extraction round.
+            continue
+ 
+        neighbors = list(neighbor_set)
+        m = bi_adj(g, neighbors, frontier)
+ 
+        if any(sum(row) == 1 for row in m.data):
+            # Easy vertex — no CNOTs needed
+            apply_cnots(g, c, frontier, qubit_map, [], m, neighbors,
+                        current_states=current_states, cost_acc=cost_acc)
+            continue
+ 
+        # Greedy reduction with flavor awareness, no randomization
+        frontier_states = [current_states[qubit_map[v]] for v in frontier]
+        ops = greedy_reduction(
+            m, states=frontier_states, threshold=threshold, rng=None,
+        )
+ 
+        if ops is not None:
+            cnots = [CNOT(target, control) for control, target in ops]
+        else:
+            # Gaussian fallback (extremely rare but handle for safety)
+            perm = column_optimal_swap(m)
+            perm = {v: k for k, v in perm.items()}
+            neighbors2 = [neighbors[perm[i]] for i in range(len(neighbors))]
+            m = bi_adj(g, neighbors2, frontier)
+            cnots = m.to_cnots(optimize=True)
+            cnots = filter_duplicate_cnots(cnots)
+            neighbors = neighbors2
+ 
+        apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors,
+                    current_states=current_states, cost_acc=cost_acc)
+ 
+    return cost_acc.cost
+
+def _evaluate_lookahead(
+    g: BaseGraph,
+    c: Circuit,
+    frontier: List,
+    qubit_map: Dict,
+    gadgets: Dict,
+    current_states: List[int],
+    m: Mat2,
+    neighbors: List,
+    default_ops: List[Tuple[int, int]],
+    frontier_states: List[int],
+    lookahead_depth: int,
+    lookahead_thresholds: List[int],
+    optimize_czs: bool,
+    threshold: int,
+    w_cnot: float,
+    w_cz: float,
+    w_msd: float,
+    n_random: int = 0,
+    rng_seed: int = None,
+) -> List[Tuple[int, int]]:
+    """Evaluate CNOT alternatives with forward simulation, return best ops.
+
+    Parameters
+    ----------
+    g, c, frontier, qubit_map, gadgets, current_states
+        Current extraction state.  NOT modified (snapshot is taken internally).
+    m : Mat2
+        Current biadjacency matrix.
+    neighbors : list
+        Current neighbor vertices.
+    default_ops : list of (int, int)
+        The greedy_reduction result that would be used without lookahead.
+    frontier_states : list of int
+        Flavor states per frontier row.
+    lookahead_depth : int
+        Number of additional extraction rounds to simulate.
+    lookahead_thresholds : list of int
+        Thresholds to test when generating alternatives.
+    optimize_czs : bool
+        Passed to clean_frontier during simulation.
+    threshold : int
+        Threshold used for greedy decisions during simulation.
+    w_cnot, w_cz, w_msd : float
+        Weights for the cost function.
+ 
+    Returns
+    -------
+    list of (int, int)
+        Best operation list (greedy_reduction format).
+    """
+    # Gate 1: Only trigger if default has bad CNOTs
+    # if not _has_bad_ops(default_ops, frontier_states):
+    #     return default_ops
+ 
+    # Gate 2: Generate structurally distinct alternatives
+    alternatives = _generate_cnot_alternatives(
+        m, frontier_states, lookahead_thresholds,
+        n_random=n_random,
+        rng_seed=rng_seed,
+    )
+    # print(f"  Lookahead: {len(alternatives)} distinct alternatives at this decision point")
+
+ 
+    # Gate 3: If only one distinct alternative, no simulation needed
+    if len(alternatives) <= 1:
+        # Return the single alternative (which may be better than default_ops
+        # if deduplication picked a lower-bad-count variant)
+        return alternatives[0] if alternatives else default_ops
+ 
+    # Gate 4: Simulate each alternative (including the default)
+    snapshot = ExtractionSnapshot.capture(
+        g, c, frontier, qubit_map, gadgets, current_states,
+    )
+
+    # Include default_ops in the candidate pool to ensure lookahead
+    # can only improve, never worsen, the greedy result.
+    # It may already be covered by one of the deterministic alternatives,
+    # but if rng produced a unique path, this captures it.
+    all_candidates = [default_ops] + [alt for alt in alternatives
+                                       if alt != default_ops]
+
+    best_ops = default_ops
+    best_cost = float('inf')
+
+    for alt_ops in all_candidates:
+        cost = _simulate_forward(
+            snapshot, alt_ops, m, neighbors,
+            n_rounds=lookahead_depth,
+            optimize_czs=optimize_czs,
+            threshold=threshold,
+            w_cnot=w_cnot,
+            w_cz=w_cz,
+            w_msd=w_msd,
+        )
+        if cost < best_cost:
+            best_cost = cost
+            best_ops = alt_ops
+ 
+    return best_ops
 
 def extract_circuit(
-        g: BaseGraph[VT, ET],
-        optimize_czs: bool = True,
-        optimize_cnots: int = 2,
-        up_to_perm: bool = False,
-        quiet: bool = True
-        ) -> Circuit:
-    """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`,
+    g: BaseGraph[VT, ET],
+    optimize_czs: bool = True,
+    optimize_cnots: int = 2,
+    up_to_perm: bool = False,
+    quiet: bool = True,
+    initial_states: Optional[List[int]] = None,
+    threshold: int = 0,
+    rng: Optional[random.Random] = None,
+    lookahead_depth: int = 0,
+    lookahead_thresholds: Optional[List[int]] = None,
+    w_cnot: float = 1.0,
+    w_cz: float = 1.0,
+    w_msd: float = 1.0,
+    n_lookahead_random: int = 0,
+) -> Circuit:
+    """Given a graph put into semi-normal form by :func:`~pyzx.simplify.full_reduce`, 
     it extracts its equivalent set of gates into an instance of :class:`~pyzx.circuit.Circuit`.
     This function implements a more optimized version of the algorithm described in
     `There and back again: A circuit extraction tale <https://arxiv.org/abs/2003.01664>`_
@@ -616,6 +1271,12 @@ def extract_circuit(
         optimize_cnots: (0,1,2,3) Level of CNOT optimization to apply.
         up_to_perm: If true, returns a circuit that is equivalent to the given graph up to a permutation of the inputs.
         quiet: Whether to print detailed output of the extraction process.
+        initial_states: If provided, describes the initial states of the 3D color code for each logical qubit. 0 -> downward, 1 -> upward (regular)
+        threshold: When optimizing CNOTs, accept a safe CNOT even if it reduces up to `threshold` fewer 1s than the best available reduction. Only has effect when `initial_states` is provided and the best candidate is a bad CNOT.
+        lookahead_depth=0     → lookahead disabled (existing behavior)
+        lookahead_depth=2     → simulate 2 additional rounds after each alternative
+        lookahead_thresholds  → which thresholds to test [default: [0, 1, 2]]
+        w_cnot, w_cz, w_msd   → cost weights (same semantics as multi_restart_extract)
 
     Raises:
         ValueError: If the graph contains ground vertices or has differing
@@ -665,10 +1326,16 @@ def extract_circuit(
 
     czs_saved = 0
     q: Union[float, int]
+
+    current_states = None
+    if initial_states is not None:
+        if len(initial_states) != len(outputs):
+            raise ValueError("initial_states length must match number of outputs")
+        current_states = list(initial_states)
     
     while True:
         # preprocessing
-        czs_saved += clean_frontier(g, c, frontier, qubit_map, optimize_czs)
+        czs_saved += clean_frontier(g, c, frontier, qubit_map, optimize_czs, current_states)
         
         # Now we can proceed with the actual extraction
         # First make sure that frontier is connected in correct way to inputs
@@ -686,17 +1353,36 @@ def extract_circuit(
         m = bi_adj(g, neighbors, frontier)
         if all(sum(row) != 1 for row in m.data):  # No easy vertex
             if optimize_cnots > 1:
-                greedy_operations = greedy_reduction(m)
+                if current_states is not None:
+                    frontier_states = [current_states[qubit_map[v]] for v in frontier]
+                else:
+                    frontier_states = None
+                greedy_operations = greedy_reduction(m, states=frontier_states, threshold=threshold, rng=rng)
+ 
+                # ── Bounded lookahead: evaluate alternative CNOT sets ──
+                if (lookahead_depth > 0 and greedy_operations is not None
+                        and current_states is not None and frontier_states is not None):
+                    greedy_operations = _evaluate_lookahead(
+                        g, c, frontier, qubit_map, gadgets, current_states,
+                        m, neighbors, greedy_operations, frontier_states,
+                        lookahead_depth,
+                        lookahead_thresholds if lookahead_thresholds is not None else [0, 1, 2],
+                        optimize_czs, threshold, w_cnot, w_cz, w_msd,
+                        n_random=n_lookahead_random,
+                    )
             else:
                 greedy_operations = None
-
+ 
             if greedy_operations is not None:
                 greedy = [CNOT(target, control) for control, target in greedy_operations]
                 if (len(greedy) == 1 or optimize_cnots < 3) and not quiet:
                     print("Found greedy reduction with", len(greedy), "CNOT")
                 cnots = greedy
 
+            gaussian_fallback_count = 0
+
             if greedy_operations is None or (optimize_cnots == 3 and len(greedy) > 1):
+                gaussian_fallback_count += 1
                 perm = column_optimal_swap(m)
                 perm = {v: k for k, v in perm.items()}
                 neighbors2 = [neighbors[perm[i]] for i in range(len(neighbors))]
@@ -725,7 +1411,7 @@ def extract_circuit(
             if not quiet: print("Simple vertex")
             cnots = []
 
-        extracted = apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors)
+        extracted = apply_cnots(g, c, frontier, qubit_map, cnots, m, neighbors, current_states=current_states)
         if not quiet: print("Vertices extracted:", extracted)
             
     if optimize_czs:
@@ -734,8 +1420,166 @@ def extract_circuit(
     id_simp(g)  # Now the graph should only contain inputs and outputs
     # Since we were extracting from right to left, we reverse the order of the gates
     c.gates = list(reversed(c.gates))
+    # print("Number of times Gaussian elimination was used:", gaussian_fallback_count)
     return graph_to_swaps(g, up_to_perm) + c
 
+def multi_restart_extract(
+    g: BaseGraph[VT, ET],
+    initial_states: List[int],
+    n_restarts: int = 20,
+    threshold: int = 0,
+    optimize_czs: bool = True,
+    optimize_cnots: int = 2,
+    up_to_perm: bool = False,
+    quiet: bool = True,
+    seed: Optional[int] = None,
+    w_cnot: float = 1.0,
+    w_cz: float = 1.0,
+    w_msd: float = 1.0,
+    lookahead_depth: int = 0,
+    lookahead_thresholds: Optional[List[int]] = None,
+    n_lookahead_random: int = 0,
+    reoptimize_selection: bool = False,
+) -> Tuple[Circuit, Dict[str, Any]]:
+    """Run extract_circuit multiple times with randomized tie-breaking,
+    keeping the result with the lowest weighted bad-gate cost.
+
+    The first run (index 0) is always deterministic (rng=None) to ensure
+    the baseline behavior is included in the comparison.
+
+    Args:
+        g: The ZX-diagram graph (will be cloned for each restart).
+        initial_states: R/R' assignment for each qubit (0=R', 1=R).
+        n_restarts: Total number of extraction attempts.
+        threshold: Passed to greedy_reduction — how much reduction to sacrifice for a safe CNOT.
+        optimize_czs: Passed to extract_circuit.
+        optimize_cnots: Passed to extract_circuit.
+        up_to_perm: Passed to extract_circuit.
+        quiet: Passed to extract_circuit.
+        seed: Random seed for reproducibility.
+        w_cnot: Weight for bad CNOTs in the cost function. Must equal w_cz (see below).
+        w_cz: Weight for bad CZs in the cost function. Must equal w_cnot (see below).
+        w_msd: Weight for bad (misplaced) phases in the cost function.
+        reoptimize_selection: If False (default, unchanged behavior), each
+            trial is scored under the single fixed `initial_states` encoding
+            via count_cnot_faults/count_cz_faults/count_phase_faults -- the
+            same encoding every trial was extracted with. If True, each
+            trial is instead scored by its own best achievable cost under
+            ANY encoding (SigmaTracker(trial_circuit).optimize_assignment()).
+            Use True when the caller is going to re-optimize the returned
+            circuit's encoding afterward anyway (e.g. a fixed-encoding
+            "cheapest" trial can lose to a trial that looked worse under the
+            fixed encoding but re-optimizes far better -- scoring under the
+            fixed encoding would then discard the actually-best trial).
+
+    The cost model treats round-robin CZ and the forbidden-direction CNOT as
+    one resource, so w_cnot and w_cz must be equal here -- unlike standalone
+    extract_circuit, which keeps them independent for generality. This is
+    enforced below rather than merged into a single parameter, to avoid an
+    API change; prefer pyzx.tetrahedral_cost.expand_rr_weight(w_rr, w_msd) to
+    construct (w_cnot, w_cz, w_msd) for this call so the two can't drift.
+
+    Returns:
+        (best_circuit, stats) where stats contains cost details and per-restart info.
+    """
+    assert w_cnot == w_cz, (
+        f"multi_restart_extract requires w_cnot == w_cz (got {w_cnot} != {w_cz}): "
+        "round-robin CZ and the forbidden-direction CNOT are one resource in this "
+        "cost model. Use pyzx.tetrahedral_cost.expand_rr_weight(w_rr, w_msd) to "
+        "construct matching weights, or use standalone extract_circuit directly "
+        "if you genuinely need independent CNOT/CZ weights."
+    )
+    master_rng = random.Random(seed)
+    
+    best_circuit = None
+    best_cost = float('inf')
+    run_stats = []
+
+    for trial in range(n_restarts):
+        g_copy = g.clone()
+        
+        # Trial 0 is deterministic (original behavior) to guarantee 
+        # the baseline is always included
+        if trial == 0:
+            # Trial 0: VANILLA PyZX extraction (no flavor awareness at all)
+            # This guarantees the result is at least as good as baseline.
+            trial_rng = None
+            trial_states = None        # ← KEY CHANGE: no states
+            trial_threshold = 0
+        elif trial == 1:
+            # Trial 1: deterministic flavor-aware extraction
+            trial_rng = None
+            trial_states = list(initial_states)
+            trial_threshold = threshold
+        else:
+            # Trials 2+: randomized flavor-aware extraction
+            trial_rng = random.Random(master_rng.randint(0, 2**32 - 1))
+            trial_states = list(initial_states)
+            trial_threshold = threshold
+        
+        circuit = extract_circuit(
+            g_copy,
+            optimize_czs=optimize_czs,
+            optimize_cnots=optimize_cnots,
+            up_to_perm=up_to_perm,
+            quiet=quiet,
+            initial_states=trial_states,
+            threshold=trial_threshold,
+            rng=trial_rng,
+            lookahead_depth=lookahead_depth,
+            lookahead_thresholds=lookahead_thresholds,
+            w_cnot=w_cnot,
+            w_cz=w_cz,
+            w_msd=w_msd,
+            n_lookahead_random=n_lookahead_random,
+        )
+
+
+        circuit_basic = circuit.to_basic_gates()
+        cnot_faults = count_cnot_faults(circuit_basic, list(initial_states))
+        cz_faults = count_cz_faults(circuit_basic, list(initial_states))
+        phase_faults = count_phase_faults(circuit_basic, list(initial_states))
+        seed_cost = w_cnot * cnot_faults['bad'] + w_cz * cz_faults['bad'] + w_msd * phase_faults['bad']
+
+        run_stat = {
+            'trial': trial,
+            'bad_cnots': cnot_faults['bad'],
+            'total_cnots': cnot_faults['total'],
+            'bad_czs': cz_faults['bad'],
+            'total_czs': cz_faults['total'],
+            'bad_phases': phase_faults['bad'],
+            'total_phases': phase_faults['total'],
+            'cost': seed_cost,
+            'seed_cost': seed_cost,
+        }
+
+        if reoptimize_selection:
+            # Score by this trial's own best achievable cost under ANY
+            # encoding, not the one fixed encoding every trial was
+            # extracted with -- see reoptimize_selection's docstring.
+            _, reoptimized_cost = SigmaTracker(circuit_basic, w_msd=w_msd, w_rr=w_cnot).optimize_assignment()
+            run_stat['reoptimized_cost'] = reoptimized_cost
+            selection_cost = reoptimized_cost
+        else:
+            selection_cost = seed_cost
+
+        run_stats.append(run_stat)
+
+        if selection_cost < best_cost:
+            best_cost = selection_cost
+            best_circuit = circuit
+
+    stats = {
+        'best_cost': best_cost,
+        'n_restarts': n_restarts,
+        'threshold': threshold,
+        'lookahead_depth': lookahead_depth,
+        'lookahead_thresholds': lookahead_thresholds,
+        'reoptimize_selection': reoptimize_selection,
+        'runs': run_stats,
+    }
+    
+    return best_circuit, stats
 
 def extract_simple(g: BaseGraph[VT, ET], up_to_perm: bool = True) -> Circuit:
     """A simplified circuit extractor that works on graphs with a causal flow (e.g. graphs arising
@@ -1509,3 +2353,150 @@ def lookahead_full(g: BaseGraph[VT, ET], optimize_for_depth: bool = False, up_to
         if d1 < d:
             c = c1
     return c
+
+def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, int]:
+    """Count bad CNOTs in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state,
+    CNOT flips the target if control is |1>. All other gates are ignored.
+
+    A CNOT is 'bad' (non-FT) when the control is |0> and target is |1>.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts and a 'details' list
+        with one entry per CNOT containing gate index, qubit indices,
+        their states at that point, and whether it was bad.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1
+        elif name == 'CNOT':
+            ctrl, tgt = gate.control, gate.target
+            is_bad = (states[ctrl] == 0 and states[tgt] == 1)
+            details.append({
+                'gate_index': idx,
+                'control':    ctrl,
+                'target':     tgt,
+                'ctrl_state': states[ctrl],
+                'tgt_state':  states[tgt],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+        # print(f"states: {states}, gate: {gate}")
+
+    # details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total CNOTs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
+
+def count_cz_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, int]:
+    """Count bad CZ gates in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state.
+    All other gates are ignored.
+
+    A CZ is 'bad' (non-FT) when both participating qubits are in the |0> state.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts and a 'details' list
+        with one entry per CZ containing gate index, qubit indices,
+        their states at that point, and whether it was bad.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1
+        elif name == 'CZ':
+            q1, q2 = gate.control, gate.target
+            is_bad = (states[q1] == 0 and states[q2] == 0)
+            details.append({
+                'gate_index': idx,
+                'qubit1':     q1,
+                'qubit2':     q2,
+                'q1_state':   states[q1],
+                'q2_state':   states[q2],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+
+    details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total CZs: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
+
+def count_phase_faults(circuit: 'Circuit', final_states: List[int], verbose: bool = False) -> Dict[str, int]:
+    """Count expensive misplaced Z/X-diagonal phases in a circuit given final qubit states.
+
+    Loops backwards through the circuit. HAD toggles a qubit's state. All other
+    gates are ignored except phase gates (ZPhase, XPhase, T, S), which are
+    classified via the shared is_expensive_misplaced_phase predicate
+    (pyzx.tetrahedral_cost) -- the same one used by CostAccumulator.record_phase
+    and by SigmaTracker (pyzx.sigma_tracker), so this matches what SigmaTracker
+    counts as MSD.
+
+    Args:
+        circuit: The circuit to analyze.
+        final_states: List of qubit states (0=down, 1=up) at the END of the circuit.
+
+    Returns:
+        A dict with 'bad', 'safe', 'total' counts.
+    """
+    states = list(final_states)
+    bad, safe = 0, 0
+    details = []
+
+    for idx in range(len(circuit.gates) - 1, -1, -1):
+        gate = circuit.gates[idx]
+        name = gate.name
+        if name == 'HAD':
+            states[gate.target] ^= 1  # type: ignore[attr-defined]  # same gap as count_cnot_faults/count_cz_faults
+        elif name in _PHASE_GATE_NAMES:
+            q = gate.target  # type: ignore[attr-defined]
+            is_bad = is_expensive_misplaced_phase(name, gate.phase, states[q])  # type: ignore[attr-defined]
+            details.append({
+                'gate_index': idx,
+                'qubit':      q,
+                'state':      states[q],
+                'is_bad':     is_bad,
+            })
+            if is_bad:
+                bad += 1
+            else:
+                safe += 1
+
+    details.sort(key=lambda e: e['gate_index'])
+    if verbose:
+        print(f"Total phases: {bad + safe}, Bad: {bad}, Safe: {safe}")
+        for d in details:
+            print(d)
+    return {'bad': bad, 'safe': safe, 'total': bad + safe}
+
