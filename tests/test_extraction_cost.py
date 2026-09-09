@@ -279,5 +279,65 @@ class TestReoptimizeSelection(unittest.TestCase):
         self.assertTrue(stats_reopt['reoptimize_selection'])
 
 
+class TestReoptimizeSelectionTieBreak(unittest.TestCase):
+    """When multiple trials tie EXACTLY on reoptimized_cost (most easily
+    forced by w_cnot=w_cz=0, which drops round-robin out of the objective
+    entirely), reoptimize_selection must not just keep whichever trial was
+    evaluated first (trial 0, plain vanilla) -- it must prefer the trial
+    with the smaller unweighted (rr + msd), i.e. the objectively smaller
+    circuit when the caller's own weights don't discriminate between
+    candidates. Without this, a config exploring strictly more trials could
+    report a WORSE raw rr than a simpler config at the same weight, despite
+    both tying on the requested objective -- this was caught by the paper's
+    Figure-1 sweep on gf2^5_mult.qasm at (w_rr=0.0, w_msd=1.0).
+
+    This n=4 case was found by a small search over (n, n_gates, seed)
+    specifically because trial 0 and trials 1-3 tie exactly on
+    reoptimized_cost but differ in raw rr (5 vs 4).
+    """
+
+    N_QUBITS = 4
+    N_GATES = 20
+    SEED = 30
+
+    def _graph_and_initial_states(self) -> Any:
+        g = cliffordT(self.N_QUBITS, self.N_GATES, p_t=0.3, p_cnot=0.3, seed=self.SEED)
+        full_reduce(g, quiet=True)
+        rng = random.Random(self.SEED * 1000 + 2)
+        initial_states = [rng.randint(0, 1) for _ in range(self.N_QUBITS)]
+        return g, initial_states
+
+    def test_tie_prefers_smaller_unweighted_circuit(self) -> None:
+        g, initial_states = self._graph_and_initial_states()
+        circuit, stats = multi_restart_extract(
+            g.copy(), initial_states, n_restarts=4, threshold=1, seed=self.SEED,
+            w_cnot=0.0, w_cz=0.0, w_msd=1.0, quiet=True, reoptimize_selection=True,
+        )
+
+        tied_costs = {r['reoptimized_cost'] for r in stats['runs']}
+        self.assertEqual(len(tied_costs), 1, "test fixture assumes all trials tie on reoptimized_cost")
+
+        tied_rrs = [r['reoptimized_rr'] for r in stats['runs']]
+        self.assertGreater(len(set(tied_rrs)), 1, "test fixture assumes trials differ in raw rr despite the tie")
+
+        _, chosen_cost = SigmaTracker(circuit.to_basic_gates(), w_msd=1.0, w_rr=0.0).optimize_assignment()
+        self.assertAlmostEqual(chosen_cost, stats['best_cost'])
+        chosen_tracker = SigmaTracker(circuit.to_basic_gates(), w_msd=1.0, w_rr=0.0)
+        chosen_tracker.optimize_assignment()
+        self.assertEqual(chosen_tracker.round_robin_count, min(tied_rrs))
+
+    def test_default_tie_break_unchanged_first_trial_wins(self) -> None:
+        """Regression guard: reoptimize_selection=False's tie-break (first
+        trial with the minimal seed_cost wins) must not change -- only the
+        reoptimize_selection=True path gets the new secondary key."""
+        g, initial_states = self._graph_and_initial_states()
+        _, stats = multi_restart_extract(
+            g.copy(), initial_states, n_restarts=4, threshold=1, seed=self.SEED,
+            w_cnot=0.0, w_cz=0.0, w_msd=1.0, quiet=True,
+        )
+        for run in stats['runs']:
+            self.assertNotIn('reoptimized_cost', run)
+
+
 if __name__ == '__main__':
     unittest.main()

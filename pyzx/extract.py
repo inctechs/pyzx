@@ -1493,6 +1493,7 @@ def multi_restart_extract(
     
     best_circuit = None
     best_cost = float('inf')
+    best_key = (float('inf'), float('inf'))
     run_stats = []
 
     for trial in range(n_restarts):
@@ -1557,16 +1558,30 @@ def multi_restart_extract(
             # Score by this trial's own best achievable cost under ANY
             # encoding, not the one fixed encoding every trial was
             # extracted with -- see reoptimize_selection's docstring.
-            _, reoptimized_cost = SigmaTracker(circuit_basic, w_msd=w_msd, w_rr=w_cnot).optimize_assignment()
+            reopt_tracker = SigmaTracker(circuit_basic, w_msd=w_msd, w_rr=w_cnot)
+            _, reoptimized_cost = reopt_tracker.optimize_assignment()
+            # Secondary tie-break key: when the weighted objective ties
+            # exactly (e.g. w_cnot=0 makes round-robin free, so any trial
+            # that reaches the minimal msd ties regardless of its rr), pick
+            # the objectively smaller circuit under equal weighting instead
+            # of silently keeping whichever trial happened to be evaluated
+            # first (trial 0, plain vanilla). Without this, a config that
+            # explores strictly more trials could report a WORSE raw
+            # (rr, msd) than a simpler config at the same weight, even
+            # though both tie on the requested objective.
+            reopt_unweighted = reopt_tracker.round_robin_count + reopt_tracker.msd_count
             run_stat['reoptimized_cost'] = reoptimized_cost
-            selection_cost = reoptimized_cost
+            run_stat['reoptimized_rr'] = reopt_tracker.round_robin_count
+            run_stat['reoptimized_msd'] = reopt_tracker.msd_count
+            selection_key = (reoptimized_cost, reopt_unweighted)
         else:
-            selection_cost = seed_cost
+            selection_key = (seed_cost, 0.0)
 
         run_stats.append(run_stat)
 
-        if selection_cost < best_cost:
-            best_cost = selection_cost
+        if selection_key < best_key:
+            best_key = selection_key
+            best_cost = selection_key[0]
             best_circuit = circuit
 
     stats = {
