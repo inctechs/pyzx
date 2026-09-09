@@ -27,6 +27,7 @@ from .rewrite_rules import *
 from .circuit import Circuit
 from .circuit.gates import CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP
 from .tetrahedral_cost import is_expensive_misplaced_phase, _PHASE_GATE_NAMES
+from .sigma_tracker import SigmaTracker
 import random
 
 from .graph.base import BaseGraph, VT, ET
@@ -1438,6 +1439,7 @@ def multi_restart_extract(
     lookahead_depth: int = 0,
     lookahead_thresholds: Optional[List[int]] = None,
     n_lookahead_random: int = 0,
+    reoptimize_selection: bool = False,
 ) -> Tuple[Circuit, Dict[str, Any]]:
     """Run extract_circuit multiple times with randomized tie-breaking,
     keeping the result with the lowest weighted bad-gate cost.
@@ -1458,6 +1460,17 @@ def multi_restart_extract(
         w_cnot: Weight for bad CNOTs in the cost function. Must equal w_cz (see below).
         w_cz: Weight for bad CZs in the cost function. Must equal w_cnot (see below).
         w_msd: Weight for bad (misplaced) phases in the cost function.
+        reoptimize_selection: If False (default, unchanged behavior), each
+            trial is scored under the single fixed `initial_states` encoding
+            via count_cnot_faults/count_cz_faults/count_phase_faults -- the
+            same encoding every trial was extracted with. If True, each
+            trial is instead scored by its own best achievable cost under
+            ANY encoding (SigmaTracker(trial_circuit).optimize_assignment()).
+            Use True when the caller is going to re-optimize the returned
+            circuit's encoding afterward anyway (e.g. a fixed-encoding
+            "cheapest" trial can lose to a trial that looked worse under the
+            fixed encoding but re-optimizes far better -- scoring under the
+            fixed encoding would then discard the actually-best trial).
 
     The cost model treats round-robin CZ and the forbidden-direction CNOT as
     one resource, so w_cnot and w_cz must be equal here -- unlike standalone
@@ -1526,9 +1539,9 @@ def multi_restart_extract(
         cnot_faults = count_cnot_faults(circuit_basic, list(initial_states))
         cz_faults = count_cz_faults(circuit_basic, list(initial_states))
         phase_faults = count_phase_faults(circuit_basic, list(initial_states))
-        cost = w_cnot * cnot_faults['bad'] + w_cz * cz_faults['bad'] + w_msd * phase_faults['bad']
+        seed_cost = w_cnot * cnot_faults['bad'] + w_cz * cz_faults['bad'] + w_msd * phase_faults['bad']
 
-        run_stats.append({
+        run_stat = {
             'trial': trial,
             'bad_cnots': cnot_faults['bad'],
             'total_cnots': cnot_faults['total'],
@@ -1536,19 +1549,33 @@ def multi_restart_extract(
             'total_czs': cz_faults['total'],
             'bad_phases': phase_faults['bad'],
             'total_phases': phase_faults['total'],
-            'cost': cost,
-        })
-        
-        if cost < best_cost:
-            best_cost = cost
+            'cost': seed_cost,
+            'seed_cost': seed_cost,
+        }
+
+        if reoptimize_selection:
+            # Score by this trial's own best achievable cost under ANY
+            # encoding, not the one fixed encoding every trial was
+            # extracted with -- see reoptimize_selection's docstring.
+            _, reoptimized_cost = SigmaTracker(circuit_basic, w_msd=w_msd, w_rr=w_cnot).optimize_assignment()
+            run_stat['reoptimized_cost'] = reoptimized_cost
+            selection_cost = reoptimized_cost
+        else:
+            selection_cost = seed_cost
+
+        run_stats.append(run_stat)
+
+        if selection_cost < best_cost:
+            best_cost = selection_cost
             best_circuit = circuit
-    
+
     stats = {
         'best_cost': best_cost,
         'n_restarts': n_restarts,
         'threshold': threshold,
         'lookahead_depth': lookahead_depth,
         'lookahead_thresholds': lookahead_thresholds,
+        'reoptimize_selection': reoptimize_selection,
         'runs': run_stats,
     }
     

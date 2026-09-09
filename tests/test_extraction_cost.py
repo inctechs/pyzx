@@ -30,6 +30,7 @@ from pyzx.extract import (
     is_expensive_misplaced_phase,
     multi_restart_extract,
 )
+from pyzx.sigma_tracker import SigmaTracker
 
 SEED = 1337
 
@@ -209,6 +210,73 @@ class TestMultiRestartNoRegression(unittest.TestCase):
                 )
                 vanilla_cost = stats['runs'][0]['cost']
                 self.assertLessEqual(stats['best_cost'], vanilla_cost)
+
+
+class TestReoptimizeSelection(unittest.TestCase):
+    """multi_restart_extract's default trial-selection scores each trial
+    under the ONE fixed `initial_states` encoding every trial was extracted
+    with. A caller that always re-optimizes the returned circuit's encoding
+    afterward (e.g. playground/cost_pipeline.py's run_cost_aware_pipeline)
+    wants trial-selection to agree with that eventual criterion instead --
+    that's what reoptimize_selection=True is for. This n=4 case was found by
+    a small search (see the fix's PR/commit) specifically because it exhibits
+    the failure mode: the fixed-encoding metric prefers a trial that
+    re-optimizes WORSE than a trial it discards.
+    """
+
+    N_QUBITS = 4
+    N_GATES = 15
+    SEED = 9
+
+    def _graph_and_initial_states(self) -> Any:
+        g = cliffordT(self.N_QUBITS, self.N_GATES, p_t=0.3, p_cnot=0.3, seed=self.SEED)
+        full_reduce(g, quiet=True)
+        rng = random.Random(self.SEED * 1000 + 1)
+        initial_states = [rng.randint(0, 1) for _ in range(self.N_QUBITS)]
+        return g, initial_states
+
+    @staticmethod
+    def _true_reoptimized_cost(circuit: Circuit) -> float:
+        _, cost = SigmaTracker(circuit.to_basic_gates(), w_msd=1.0, w_rr=1.0).optimize_assignment()
+        return cost
+
+    def test_default_matches_existing_behavior(self) -> None:
+        """reoptimize_selection omitted (default False) must reproduce
+        exactly what multi_restart_extract already did before this
+        parameter existed -- a regression guard against accidentally
+        changing default behavior."""
+        g, initial_states = self._graph_and_initial_states()
+        circuit, stats = multi_restart_extract(
+            g.copy(), initial_states, n_restarts=4, threshold=1, seed=self.SEED,
+            w_cnot=1.0, w_cz=1.0, w_msd=1.0, quiet=True,
+        )
+        self.assertNotIn('reoptimized_cost', stats['runs'][0])
+        self.assertAlmostEqual(self._true_reoptimized_cost(circuit), 2.0)
+
+    def test_reoptimize_selection_picks_the_better_after_reoptimization_trial(self) -> None:
+        g, initial_states = self._graph_and_initial_states()
+
+        circuit_default, _ = multi_restart_extract(
+            g.copy(), initial_states, n_restarts=4, threshold=1, seed=self.SEED,
+            w_cnot=1.0, w_cz=1.0, w_msd=1.0, quiet=True, reoptimize_selection=False,
+        )
+        circuit_reopt, stats_reopt = multi_restart_extract(
+            g.copy(), initial_states, n_restarts=4, threshold=1, seed=self.SEED,
+            w_cnot=1.0, w_cz=1.0, w_msd=1.0, quiet=True, reoptimize_selection=True,
+        )
+
+        default_true_cost = self._true_reoptimized_cost(circuit_default)
+        reopt_true_cost = self._true_reoptimized_cost(circuit_reopt)
+
+        # The whole point of the fix: reoptimize_selection=True finds a
+        # trial whose OWN best-achievable cost beats what the fixed-encoding
+        # metric settled for.
+        self.assertLess(reopt_true_cost, default_true_cost)
+        # stats['best_cost'] under reoptimize_selection=True is itself a
+        # re-optimized cost, so it should equal the independently-recomputed
+        # true cost of the circuit actually returned.
+        self.assertAlmostEqual(stats_reopt['best_cost'], reopt_true_cost)
+        self.assertTrue(stats_reopt['reoptimize_selection'])
 
 
 if __name__ == '__main__':
