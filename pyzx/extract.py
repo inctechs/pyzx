@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__ = ['extract_circuit', 'extract_simple', 'graph_to_swaps', 'extract_clifford_normal_form',
-           'lookahead_extract_base', 'lookahead_full', 'lookahead_fast', 'lookahead_extract', 'multi_restart_extract']
+__all__ = ['extract_circuit', 'extract_circuit_front_anchored', 'extract_simple', 'graph_to_swaps',
+           'extract_clifford_normal_form', 'lookahead_extract_base', 'lookahead_full', 'lookahead_fast',
+           'lookahead_extract', 'multi_restart_extract', 'multi_restart_extract_front_anchored']
 
 from fractions import Fraction
 from typing_extensions import deprecated
@@ -27,7 +28,7 @@ from .rewrite_rules import *
 from .circuit import Circuit
 from .circuit.gates import CNOT, HAD, ZPhase, XPhase, CZ, XCX, SWAP
 from .tetrahedral_cost import is_expensive_misplaced_phase, _PHASE_GATE_NAMES
-from .sigma_tracker import SigmaTracker
+from .sigma_tracker import Flavor, SigmaTracker
 import random
 
 from .graph.base import BaseGraph, VT, ET
@@ -1423,6 +1424,89 @@ def extract_circuit(
     # print("Number of times Gaussian elimination was used:", gaussian_fallback_count)
     return graph_to_swaps(g, up_to_perm) + c
 
+def extract_circuit_front_anchored(
+    g: BaseGraph[VT, ET],
+    optimize_czs: bool = True,
+    optimize_cnots: int = 2,
+    up_to_perm: bool = False,
+    quiet: bool = True,
+    initial_states: Optional[List[int]] = None,
+    threshold: int = 0,
+    rng: Optional[random.Random] = None,
+    lookahead_depth: int = 0,
+    lookahead_thresholds: Optional[List[int]] = None,
+    w_cnot: float = 1.0,
+    w_cz: float = 1.0,
+    w_msd: float = 1.0,
+    n_lookahead_random: int = 0,
+) -> Circuit:
+    """Like :func:`extract_circuit`, but `initial_states` is interpreted as a
+    FRONT-anchored (true circuit-input) R/R' assignment, matching
+    :class:`~pyzx.sigma_tracker.SigmaTracker`'s own convention -- NOT
+    :func:`extract_circuit`'s own END-anchored convention (its own
+    `initial_states` seeds `current_states` at the graph's output boundary;
+    `multi_restart_extract` even hands that same array to
+    `count_cnot_faults`/`count_cz_faults`/`count_phase_faults` as their
+    `final_states` argument). Do not pass one function's `initial_states` to
+    the other.
+
+    Implementation: every gate in this Clifford+T gate set (H, S, T, S-dag,
+    T-dag, CNOT, CZ) is individually a symmetric matrix (the one exception,
+    Pauli Y, is anti-symmetric but only ever contributes an irrelevant
+    global phase), so transposing a circuit's unitary is exactly the same
+    gate list run in reverse order -- no gate substitution needed. A
+    ZX-diagram has no inherent input/output direction, so swapping a graph's
+    input/output boundary labels (`BaseGraph.set_inputs`/`set_outputs`, NOT
+    `g.copy(adjoint=True)` -- that also conjugates phases, which is not what
+    is needed here) turns "extract from the true front toward the true
+    back" into an ordinary call to the existing, unmodified
+    :func:`extract_circuit` (which always processes from its own output
+    boundary toward its own input boundary). Reversing the returned gate
+    list undoes the transpose. Verified empirically (random circuits,
+    `pyzx.tensor.compare_tensors`) to reproduce the exact target unitary up
+    to global phase.
+
+    To count cost on the returned circuit, use
+    `SigmaTracker(circuit, front_assignment)` (front-anchored, like this
+    function's own `initial_states`) -- never
+    `count_cnot_faults`/`count_cz_faults`/`count_phase_faults` with this
+    function's `initial_states` as their `final_states` argument, which
+    expects an END-anchored array.
+
+    On its own, this function is still subject to the same threshold/
+    lookahead greedy trade-off as `extract_circuit` (see
+    `greedy_reduction`'s `threshold` parameter): flavor-aware Gaussian
+    elimination can accept a less-reducing step purely to dodge a
+    locally-bad-flavor CNOT, with no guarantee that trade pays off globally,
+    and can regress vs. a flavor-blind vanilla extraction of the same graph.
+    Callers that need a no-regression guarantee should use
+    :func:`multi_restart_extract_front_anchored` instead, which -- like
+    :func:`multi_restart_extract` -- always includes a vanilla trial and
+    returns the minimum-cost trial.
+    """
+    g_t = g.copy()
+    inputs, outputs = g_t.inputs(), g_t.outputs()
+    g_t.set_inputs(outputs)
+    g_t.set_outputs(inputs)
+    c = extract_circuit(
+        g_t,
+        optimize_czs=optimize_czs,
+        optimize_cnots=optimize_cnots,
+        up_to_perm=up_to_perm,
+        quiet=quiet,
+        initial_states=initial_states,
+        threshold=threshold,
+        rng=rng,
+        lookahead_depth=lookahead_depth,
+        lookahead_thresholds=lookahead_thresholds,
+        w_cnot=w_cnot,
+        w_cz=w_cz,
+        w_msd=w_msd,
+        n_lookahead_random=n_lookahead_random,
+    )
+    c.gates = list(reversed(c.gates))
+    return c
+
 def multi_restart_extract(
     g: BaseGraph[VT, ET],
     initial_states: List[int],
@@ -1594,6 +1678,125 @@ def multi_restart_extract(
         'runs': run_stats,
     }
     
+    return best_circuit, stats
+
+def multi_restart_extract_front_anchored(
+    g: BaseGraph[VT, ET],
+    initial_states: List[int],
+    n_restarts: int = 20,
+    threshold: int = 0,
+    optimize_czs: bool = True,
+    optimize_cnots: int = 2,
+    up_to_perm: bool = False,
+    quiet: bool = True,
+    seed: Optional[int] = None,
+    w_cnot: float = 1.0,
+    w_cz: float = 1.0,
+    w_msd: float = 1.0,
+    lookahead_depth: int = 0,
+    lookahead_thresholds: Optional[List[int]] = None,
+    n_lookahead_random: int = 0,
+) -> Tuple[Circuit, Dict[str, Any]]:
+    """Front-anchored sibling of :func:`multi_restart_extract`: same
+    trial-0-is-always-vanilla + best-of-cost-across-trials structure, but
+    every trial is extracted via :func:`extract_circuit_front_anchored`
+    instead of :func:`extract_circuit`, so `initial_states` here is a true
+    FRONT (circuit-input) R/R' assignment -- see
+    `extract_circuit_front_anchored`'s docstring for why this is a distinct
+    function rather than a flag on `multi_restart_extract`: that function's
+    own trial-selection scoring is hard-coded to the END-anchored
+    `count_cnot_faults`/`count_cz_faults`/`count_phase_faults` convention
+    (`initial_states` treated as `final_states`), which is the wrong
+    convention for front-anchored trials. Every trial here is instead scored
+    via `SigmaTracker(circuit, front_assignment).propagate()` -- the only
+    correct way to cost a front-anchored circuit -- including trial 0
+    (plain vanilla, extracted with no target at all, but still scored
+    against the same `initial_states` as every other trial, since the
+    question is always "what does this front assignment cost on this
+    circuit", never what a given trial happened to be extracted for).
+
+    Because trial 0 is unconditionally included and the minimum-cost trial
+    is returned, the result is never worse than plain vanilla
+    `extract_circuit_front_anchored(g, initial_states=None)` scored under
+    the same `initial_states` -- the same no-regression guarantee
+    `multi_restart_extract` provides for its own end-anchored trials.
+
+    See `multi_restart_extract`'s docstring for the meaning of every other
+    parameter; identical here except for the front-anchored scoring above.
+    """
+    assert w_cnot == w_cz, (
+        f"multi_restart_extract_front_anchored requires w_cnot == w_cz (got {w_cnot} != {w_cz}): "
+        "round-robin CZ and the forbidden-direction CNOT are one resource in this "
+        "cost model. Use pyzx.tetrahedral_cost.expand_rr_weight(w_rr, w_msd) to "
+        "construct matching weights."
+    )
+    master_rng = random.Random(seed)
+    front_assignment = [Flavor(s) for s in initial_states]
+
+    best_circuit: Optional[Circuit] = None
+    best_cost = float('inf')
+    run_stats: List[Dict[str, float]] = []
+
+    for trial in range(n_restarts):
+        g_copy = g.clone()
+
+        if trial == 0:
+            # Trial 0: VANILLA extraction (no flavor awareness at all).
+            # This guarantees the result is at least as good as baseline.
+            trial_rng = None
+            trial_states = None
+            trial_threshold = 0
+        elif trial == 1:
+            trial_rng = None
+            trial_states = list(initial_states)
+            trial_threshold = threshold
+        else:
+            trial_rng = random.Random(master_rng.randint(0, 2**32 - 1))
+            trial_states = list(initial_states)
+            trial_threshold = threshold
+
+        circuit = extract_circuit_front_anchored(
+            g_copy,
+            optimize_czs=optimize_czs,
+            optimize_cnots=optimize_cnots,
+            up_to_perm=up_to_perm,
+            quiet=quiet,
+            initial_states=trial_states,
+            threshold=trial_threshold,
+            rng=trial_rng,
+            lookahead_depth=lookahead_depth,
+            lookahead_thresholds=lookahead_thresholds,
+            w_cnot=w_cnot,
+            w_cz=w_cz,
+            w_msd=w_msd,
+            n_lookahead_random=n_lookahead_random,
+        )
+
+        circuit_basic = circuit.to_basic_gates()
+        tracker = SigmaTracker(circuit_basic, front_assignment, w_msd=w_msd, w_rr=w_cnot).propagate()
+        cost = tracker.cost
+
+        run_stats.append({
+            'trial': trial,
+            'round_robin_count': tracker.round_robin_count,
+            'msd_count': tracker.msd_count,
+            'cost': cost,
+        })
+
+        if cost < best_cost:
+            best_cost = cost
+            best_circuit = circuit_basic
+
+    stats = {
+        'best_cost': best_cost,
+        'n_restarts': n_restarts,
+        'threshold': threshold,
+        'lookahead_depth': lookahead_depth,
+        'lookahead_thresholds': lookahead_thresholds,
+        'runs': run_stats,
+    }
+
+    assert best_circuit is not None, "n_restarts must be >= 1"
     return best_circuit, stats
 
 def extract_simple(g: BaseGraph[VT, ET], up_to_perm: bool = True) -> Circuit:
