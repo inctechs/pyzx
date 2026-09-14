@@ -80,3 +80,39 @@ def expand_rr_weight(w_rr: float, w_msd: float) -> tuple[float, float, float]:
     Returns (w_cnot, w_cz, w_msd) == (w_rr, w_rr, w_msd).
     """
     return w_rr, w_rr, w_msd
+
+
+def combined_cost(rr_count: int, msd_count: int, *, w_msd: float = 1.0) -> float:
+    """Single combined reporting cost for an extracted circuit.
+
+    Reporting-only helper: an encoding-mismatched T falls back to a
+    wrong-direction transversal operation, so it belongs in the same
+    "expensive non-transversal operation" currency as a round-robin CZ or
+    forbidden-direction CNOT. This collapses the two-resource
+    (rr_count, msd_count) pair extraction/SigmaTracker track separately into
+    one number for reporting, at exchange rate `w_msd` (mismatched-T cost in
+    units of one expensive two-qubit op).
+
+    Not used anywhere in the extraction objective or `run_cost_aware_pipeline`
+    -- the optimizer must keep seeing both resources separately, since a run
+    with few two-qubit ops but many mismatched T gates is still bad
+    internally. `w_msd` defaults to 1.0 (no evidence in the code for a
+    different exchange rate; see CostAccumulator/SigmaTracker's own default
+    weights), but is a required-explicit parameter here so a caller reporting
+    at a different ratio can't silently fall back to the wrong one.
+
+    Parameters
+    ----------
+    rr_count : int
+        Count of expensive two-qubit ops (bad CNOTs + bad CZs).
+    msd_count : int
+        Count of encoding-mismatched T/S phase gates.
+    w_msd : float
+        Cost of one mismatched T in units of one expensive two-qubit op.
+
+    Returns
+    -------
+    float
+        rr_count + w_msd * msd_count.
+    """
+    return rr_count + w_msd * msd_count
