@@ -23,6 +23,7 @@ import pyzx as zx
 from pyzx.circuit import Circuit
 from pyzx.extract import count_cnot_faults, count_cz_faults, count_phase_faults
 from pyzx.sigma_tracker import Flavor, SigmaTracker
+from pyzx.tetrahedral_cost import combined_cost
 
 _RANDOM_GATE_TYPES_1Q = ["H", "T", "T*", "S", "S*", "Z", "X"]
 _RANDOM_GATE_TYPES_2Q = ["CNOT", "CZ"]
@@ -116,3 +117,44 @@ class TestCostModelEquivalence:
                     f"extracted trial {trial} (n={n}, gates={n_gates}, seed={seed}) "
                     f"assignment {assignment_trial}",
                 )
+
+
+class TestCombinedCost:
+    """combined_cost is a reporting-only collapse of (rr_count, msd_count)
+    into one number; it must match rr_count + w_msd * msd_count exactly, and
+    stay consistent with the separate counts this file's equivalence test
+    already verifies agree between SigmaTracker and extraction's backward pass.
+    """
+
+    def test_matches_raw_formula(self) -> None:
+        w_msd = 1.0
+        for rr_count, msd_count in [(0, 0), (3, 0), (0, 5), (7, 2), (1, 1)]:
+            assert combined_cost(rr_count, msd_count, w_msd=w_msd) == rr_count + w_msd * msd_count
+
+    def test_default_weight_is_confirmed_k(self) -> None:
+        assert combined_cost(4, 3) == 4 + 1.0 * 3
+
+    def test_agrees_with_equivalence_circuits(self) -> None:
+        rng = random.Random(1337)
+        w_msd = 1.0
+        for _trial in range(15):
+            n = rng.randint(2, 8)
+            n_gates = rng.randint(10, 60)
+            seed = rng.randint(0, 10**9)
+            g = zx.generate.cliffordT(n, n_gates, p_t=0.3, p_cnot=0.3, seed=seed)
+            zx.simplify.full_reduce(g, quiet=True)
+            circuit = zx.extract_circuit(g.copy(), quiet=True).to_basic_gates()
+
+            assignment = [rng.choice([Flavor.R, Flavor.R_PRIME]) for _ in range(circuit.qubits)]
+            tracker = SigmaTracker(circuit, assignment).propagate()
+            final_states = [int(f) for f in tracker.final_flavors()]
+
+            cn = count_cnot_faults(circuit, final_states)
+            cz = count_cz_faults(circuit, final_states)
+            ph = count_phase_faults(circuit, final_states)
+            rr_count = cn['bad'] + cz['bad']
+            msd_count = ph['bad']
+
+            assert rr_count == tracker.round_robin_count
+            assert msd_count == tracker.msd_count
+            assert combined_cost(rr_count, msd_count, w_msd=w_msd) == rr_count + w_msd * msd_count
