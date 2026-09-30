@@ -7,8 +7,8 @@ independently, then tests their interaction.
 from __future__ import annotations
 
 import random
+import unittest
 
-import pytest
 import pyzx as zx
 from pyzx.circuit.gates import S as SGate
 from pyzx.circuit.gates import T as TGate
@@ -65,17 +65,12 @@ def make_circuit(n_qubits: int, gate_list: list) -> zx.Circuit:
     return c
 
 
-@pytest.fixture
-def tracker_factory():
-    """Factory fixture: returns a function that builds a propagated SigmaTracker."""
-
-    def _make(n_qubits, gate_list, assignment=None, w_msd=1.0, w_rr=1.0):
-        c = make_circuit(n_qubits, gate_list)
-        t = SigmaTracker(c, assignment, w_msd=w_msd, w_rr=w_rr)
-        t.propagate()
-        return t
-
-    return _make
+def make_tracker(n_qubits, gate_list, assignment=None, w_msd=1.0, w_rr=1.0) -> SigmaTracker:
+    """Build a propagated SigmaTracker for the given gate list."""
+    c = make_circuit(n_qubits, gate_list)
+    t = SigmaTracker(c, assignment, w_msd=w_msd, w_rr=w_rr)
+    t.propagate()
+    return t
 
 
 # ===================================================================
@@ -83,22 +78,24 @@ def tracker_factory():
 # ===================================================================
 
 
-class TestSingleQubitZDiagonal:
+class TestSingleQubitZDiagonal(unittest.TestCase):
     """T, T†, S, S† are free on R, expensive (MSD) on R'."""
 
-    @pytest.mark.parametrize("gate", ["T", "T*", "S", "S*"])
-    def test_free_on_r(self, tracker_factory, gate):
-        t = tracker_factory(1, [(gate, 0)], [R])
-        assert t.cost == 0
-        assert t.msd_count == 0
+    def test_free_on_r(self):
+        for gate in ["T", "T*", "S", "S*"]:
+            with self.subTest(gate=gate):
+                t = make_tracker(1, [(gate, 0)], [R])
+                self.assertEqual(t.cost, 0)
+                self.assertEqual(t.msd_count, 0)
 
-    @pytest.mark.parametrize("gate", ["T", "T*", "S", "S*"])
-    def test_expensive_on_r_prime(self, tracker_factory, gate):
-        t = tracker_factory(1, [(gate, 0)], [Rp])
-        assert t.cost == 1
-        assert t.msd_count == 1
-        assert t.round_robin_count == 0
-        assert t.expensive_ops[0].cost_type == CostType.MSD
+    def test_expensive_on_r_prime(self):
+        for gate in ["T", "T*", "S", "S*"]:
+            with self.subTest(gate=gate):
+                t = make_tracker(1, [(gate, 0)], [Rp])
+                self.assertEqual(t.cost, 1)
+                self.assertEqual(t.msd_count, 1)
+                self.assertEqual(t.round_robin_count, 0)
+                self.assertEqual(t.expensive_ops[0].cost_type, CostType.MSD)
 
 
 # ===================================================================
@@ -106,26 +103,26 @@ class TestSingleQubitZDiagonal:
 # ===================================================================
 
 
-class TestHadamardToggle:
-    def test_h_flips_r_to_r_prime(self, tracker_factory):
+class TestHadamardToggle(unittest.TestCase):
+    def test_h_flips_r_to_r_prime(self):
         """Start R, apply H -> R', then T -> expensive."""
-        t = tracker_factory(1, [("H", 0), ("T", 0)], [R])
-        assert t.msd_count == 1
+        t = make_tracker(1, [("H", 0), ("T", 0)], [R])
+        self.assertEqual(t.msd_count, 1)
 
-    def test_h_flips_r_prime_to_r(self, tracker_factory):
+    def test_h_flips_r_prime_to_r(self):
         """Start R', apply H -> R, then T -> free."""
-        t = tracker_factory(1, [("H", 0), ("T", 0)], [Rp])
-        assert t.msd_count == 0
+        t = make_tracker(1, [("H", 0), ("T", 0)], [Rp])
+        self.assertEqual(t.msd_count, 0)
 
-    def test_double_h_cancels(self, tracker_factory):
+    def test_double_h_cancels(self):
         """HH = I, so flavor returns to initial."""
-        t = tracker_factory(1, [("H", 0), ("H", 0), ("T", 0)], [R])
-        assert t.cost == 0
+        t = make_tracker(1, [("H", 0), ("H", 0), ("T", 0)], [R])
+        self.assertEqual(t.cost, 0)
 
-    def test_triple_h_is_single_flip(self, tracker_factory):
+    def test_triple_h_is_single_flip(self):
         """Three H's net to one flip."""
-        t = tracker_factory(1, [("H", 0), ("H", 0), ("H", 0), ("T", 0)], [R])
-        assert t.msd_count == 1
+        t = make_tracker(1, [("H", 0), ("H", 0), ("H", 0), ("T", 0)], [R])
+        self.assertEqual(t.msd_count, 1)
 
 
 # ===================================================================
@@ -133,25 +130,23 @@ class TestHadamardToggle:
 # ===================================================================
 
 
-class TestCNOTCost:
-    @pytest.mark.parametrize(
-        ("ctrl", "tgt", "expected_cost"),
-        [
-            (R, R, 0),
-            (R, Rp, 0),
-            (Rp, Rp, 0),
-            (Rp, R, 1),
-        ],
-        ids=["R-R", "R-R'", "R'-R'", "R'-R_expensive"],
-    )
-    def test_cnot_cost_table(self, tracker_factory, ctrl, tgt, expected_cost):
-        t = tracker_factory(2, [("CNOT", 0, 1)], [ctrl, tgt])
-        assert t.cost == expected_cost
+class TestCNOTCost(unittest.TestCase):
+    def test_cnot_cost_table(self):
+        cases = [
+            ("R-R", R, R, 0),
+            ("R-R'", R, Rp, 0),
+            ("R'-R'", Rp, Rp, 0),
+            ("R'-R_expensive", Rp, R, 1),
+        ]
+        for case_id, ctrl, tgt, expected_cost in cases:
+            with self.subTest(case_id):
+                t = make_tracker(2, [("CNOT", 0, 1)], [ctrl, tgt])
+                self.assertEqual(t.cost, expected_cost)
 
-    def test_expensive_cnot_is_round_robin(self, tracker_factory):
-        t = tracker_factory(2, [("CNOT", 0, 1)], [Rp, R])
-        assert t.round_robin_count == 1
-        assert t.expensive_ops[0].cost_type == CostType.ROUND_ROBIN
+    def test_expensive_cnot_is_round_robin(self):
+        t = make_tracker(2, [("CNOT", 0, 1)], [Rp, R])
+        self.assertEqual(t.round_robin_count, 1)
+        self.assertEqual(t.expensive_ops[0].cost_type, CostType.ROUND_ROBIN)
 
 
 # ===================================================================
@@ -159,25 +154,23 @@ class TestCNOTCost:
 # ===================================================================
 
 
-class TestCZCost:
-    @pytest.mark.parametrize(
-        ("fa", "fb", "expected_cost"),
-        [
-            (R, R, 0),
-            (R, Rp, 0),
-            (Rp, R, 0),
-            (Rp, Rp, 1),
-        ],
-        ids=["R-R", "R-R'", "R'-R", "R'-R'_expensive"],
-    )
-    def test_cz_cost_table(self, tracker_factory, fa, fb, expected_cost):
-        t = tracker_factory(2, [("CZ", 0, 1)], [fa, fb])
-        assert t.cost == expected_cost
+class TestCZCost(unittest.TestCase):
+    def test_cz_cost_table(self):
+        cases = [
+            ("R-R", R, R, 0),
+            ("R-R'", R, Rp, 0),
+            ("R'-R", Rp, R, 0),
+            ("R'-R'_expensive", Rp, Rp, 1),
+        ]
+        for case_id, fa, fb, expected_cost in cases:
+            with self.subTest(case_id):
+                t = make_tracker(2, [("CZ", 0, 1)], [fa, fb])
+                self.assertEqual(t.cost, expected_cost)
 
-    def test_expensive_cz_is_round_robin(self, tracker_factory):
-        t = tracker_factory(2, [("CZ", 0, 1)], [Rp, Rp])
-        assert t.round_robin_count == 1
-        assert t.expensive_ops[0].cost_type == CostType.ROUND_ROBIN
+    def test_expensive_cz_is_round_robin(self):
+        t = make_tracker(2, [("CZ", 0, 1)], [Rp, Rp])
+        self.assertEqual(t.round_robin_count, 1)
+        self.assertEqual(t.expensive_ops[0].cost_type, CostType.ROUND_ROBIN)
 
 
 # ===================================================================
@@ -185,16 +178,17 @@ class TestCZCost:
 # ===================================================================
 
 
-class TestNoArbitrage:
-    def test_cnot_cz_equivalence(self, tracker_factory):
+class TestNoArbitrage(unittest.TestCase):
+    def test_cnot_cz_equivalence(self):
         """CNOT(a,b) = (I x H) CZ(a,b) (I x H).
 
         The expensive CNOT case (R', R) maps to the expensive CZ case (R', R')
         because the H on qubit b flips its flavor.
         """
-        t_cnot = tracker_factory(2, [("CNOT", 0, 1)], [Rp, R])
-        t_equiv = tracker_factory(2, [("H", 1), ("CZ", 0, 1), ("H", 1)], [Rp, R])
-        assert t_cnot.cost == t_equiv.cost == 1
+        t_cnot = make_tracker(2, [("CNOT", 0, 1)], [Rp, R])
+        t_equiv = make_tracker(2, [("H", 1), ("CZ", 0, 1), ("H", 1)], [Rp, R])
+        self.assertEqual(t_cnot.cost, 1)
+        self.assertEqual(t_equiv.cost, 1)
 
 
 # ===================================================================
@@ -202,16 +196,18 @@ class TestNoArbitrage:
 # ===================================================================
 
 
-class TestPaulis:
-    @pytest.mark.parametrize("flavor", [R, Rp], ids=["R", "R'"])
-    def test_z_free(self, tracker_factory, flavor):
-        t = tracker_factory(1, [("Z", 0)], [flavor])
-        assert t.cost == 0
+class TestPaulis(unittest.TestCase):
+    def test_z_free(self):
+        for flavor in [R, Rp]:
+            with self.subTest(flavor=flavor):
+                t = make_tracker(1, [("Z", 0)], [flavor])
+                self.assertEqual(t.cost, 0)
 
-    @pytest.mark.parametrize("flavor", [R, Rp], ids=["R", "R'"])
-    def test_x_free(self, tracker_factory, flavor):
-        t = tracker_factory(1, [("X", 0)], [flavor])
-        assert t.cost == 0
+    def test_x_free(self):
+        for flavor in [R, Rp]:
+            with self.subTest(flavor=flavor):
+                t = make_tracker(1, [("X", 0)], [flavor])
+                self.assertEqual(t.cost, 0)
 
 
 # ===================================================================
@@ -219,27 +215,27 @@ class TestPaulis:
 # ===================================================================
 
 
-class TestFlavorPropagation:
-    def test_multi_gate_tracking(self, tracker_factory):
+class TestFlavorPropagation(unittest.TestCase):
+    def test_multi_gate_tracking(self):
         """q0: R -> H -> R' -> T(expensive) -> H -> R -> T(free)
         q1: R' (unchanged, no H gates) -> T(expensive).
         """
-        t = tracker_factory(
+        t = make_tracker(
             2,
             [("H", 0), ("T", 0), ("H", 0), ("T", 0), ("T", 1)],
             [R, Rp],
         )
-        assert t.msd_count == 2
-        assert t.round_robin_count == 0
+        self.assertEqual(t.msd_count, 2)
+        self.assertEqual(t.round_robin_count, 0)
 
     def test_flavor_at_specific_positions(self):
         c = make_circuit(
             2, [("H", 0), ("T", 0), ("H", 0), ("T", 0), ("T", 1)]
         )
         t = SigmaTracker(c, [R, Rp]).propagate()
-        assert t.flavor_at(1, 0) == Rp  # after first H
-        assert t.flavor_at(3, 0) == R   # after second H
-        assert t.flavor_at(4, 1) == Rp  # q1 never gets H
+        self.assertEqual(t.flavor_at(1, 0), Rp)  # after first H
+        self.assertEqual(t.flavor_at(3, 0), R)   # after second H
+        self.assertEqual(t.flavor_at(4, 1), Rp)  # q1 never gets H
 
 
 # ===================================================================
@@ -247,41 +243,41 @@ class TestFlavorPropagation:
 # ===================================================================
 
 
-class TestOptimization:
+class TestOptimization(unittest.TestCase):
     def test_single_t_assigns_r(self):
         c = make_circuit(2, [("T", 0)])
         t = SigmaTracker(c)
         best, cost = t.optimize_assignment()
-        assert cost == 0
-        assert best[0] == R
+        self.assertEqual(cost, 0)
+        self.assertEqual(best[0], R)
 
     def test_unavoidable_conflict(self):
         """T, H, T on same qubit: one T is always expensive regardless of assignment."""
         c = make_circuit(1, [("T", 0), ("H", 0), ("T", 0)])
         t = SigmaTracker(c)
         _, cost = t.optimize_assignment()
-        assert cost == 1
+        self.assertEqual(cost, 1)
 
     def test_multi_qubit_joint(self):
         """T on q0 + CNOT(0,1): optimal q0=R avoids both costs."""
         c = make_circuit(2, [("T", 0), ("CNOT", 0, 1)])
         t = SigmaTracker(c)
         best, cost = t.optimize_assignment()
-        assert cost == 0
-        assert best[0] == R
+        self.assertEqual(cost, 0)
+        self.assertEqual(best[0], R)
 
     def test_optimizer_updates_tracker_state(self):
         """After optimize, tracker should reflect the best assignment."""
         c = make_circuit(2, [("T", 0), ("CNOT", 0, 1)])
         t = SigmaTracker(c)
         best, cost = t.optimize_assignment()
-        assert t.assignment == best
-        assert t.cost == cost
+        self.assertEqual(t.assignment, best)
+        self.assertEqual(t.cost, cost)
 
     def test_brute_force_rejects_large_n(self):
         c = zx.Circuit(25)
         t = SigmaTracker(c)
-        with pytest.raises(ValueError, match="infeasible"):
+        with self.assertRaisesRegex(ValueError, "infeasible"):
             t.optimize_assignment()
 
 
@@ -290,29 +286,29 @@ class TestOptimization:
 # ===================================================================
 
 
-class TestWeightedCost:
-    def test_custom_weights(self, tracker_factory):
-        t = tracker_factory(
+class TestWeightedCost(unittest.TestCase):
+    def test_custom_weights(self):
+        t = make_tracker(
             2,
             [("T", 0), ("CNOT", 0, 1)],
             [Rp, R],
             w_msd=3.0,
             w_rr=5.0,
         )
-        assert t.msd_count == 1
-        assert t.round_robin_count == 1
-        assert t.cost == pytest.approx(8.0)
+        self.assertEqual(t.msd_count, 1)
+        self.assertEqual(t.round_robin_count, 1)
+        self.assertAlmostEqual(t.cost, 8.0)
 
-    def test_zero_weight_ignores_type(self, tracker_factory):
-        t = tracker_factory(
+    def test_zero_weight_ignores_type(self):
+        t = make_tracker(
             2,
             [("T", 0), ("CNOT", 0, 1)],
             [Rp, R],
             w_msd=0.0,
             w_rr=5.0,
         )
-        assert t.cost == pytest.approx(5.0)
-        assert t.msd_count == 1  # still counted, just zero-weighted
+        self.assertAlmostEqual(t.cost, 5.0)
+        self.assertEqual(t.msd_count, 1)  # still counted, just zero-weighted
 
 
 # ===================================================================
@@ -320,46 +316,46 @@ class TestWeightedCost:
 # ===================================================================
 
 
-class TestReporting:
-    def test_expensive_gate_indices(self, tracker_factory):
-        t = tracker_factory(
+class TestReporting(unittest.TestCase):
+    def test_expensive_gate_indices(self):
+        t = make_tracker(
             2,
             [("T", 0), ("H", 0), ("T", 0), ("CNOT", 0, 1)],
             [R, R],
         )
-        assert t.expensive_gate_indices() == [2, 3]
+        self.assertEqual(t.expensive_gate_indices(), [2, 3])
 
-    def test_free_segments(self, tracker_factory):
-        t = tracker_factory(
+    def test_free_segments(self):
+        t = make_tracker(
             2,
             [("T", 0), ("H", 0), ("T", 0), ("T", 1), ("CNOT", 1, 0)],
             [R, R],
         )
-        assert t.free_segments() == [(0, 1), (3, 4)]
+        self.assertEqual(t.free_segments(), [(0, 1), (3, 4)])
 
-    def test_cost_breakdown_by_qubit(self, tracker_factory):
-        t = tracker_factory(
+    def test_cost_breakdown_by_qubit(self):
+        t = make_tracker(
             3,
             [("T", 0), ("T", 1), ("CNOT", 0, 2)],
             [Rp, Rp, R],
         )
         bd = t.cost_breakdown_by_qubit()
-        assert bd[0]["msd"] == 1
-        assert bd[0]["round_robin"] == 1
-        assert bd[1]["msd"] == 1
-        assert bd[1]["round_robin"] == 0
-        assert bd[2]["msd"] == 0
-        assert bd[2]["round_robin"] == 1
+        self.assertEqual(bd[0]["msd"], 1)
+        self.assertEqual(bd[0]["round_robin"], 1)
+        self.assertEqual(bd[1]["msd"], 1)
+        self.assertEqual(bd[1]["round_robin"], 0)
+        self.assertEqual(bd[2]["msd"], 0)
+        self.assertEqual(bd[2]["round_robin"], 1)
 
-    def test_final_flavors(self, tracker_factory):
-        t = tracker_factory(
+    def test_final_flavors(self):
+        t = make_tracker(
             2,
             [("H", 0), ("H", 0), ("H", 1)],
             [R, R],
         )
         finals = t.final_flavors()
-        assert finals[0] == R   # two H's cancel
-        assert finals[1] == Rp  # one H flips
+        self.assertEqual(finals[0], R)   # two H's cancel
+        self.assertEqual(finals[1], Rp)  # one H flips
 
 
 # ===================================================================
@@ -367,35 +363,35 @@ class TestReporting:
 # ===================================================================
 
 
-class TestEdgeCases:
+class TestEdgeCases(unittest.TestCase):
     def test_empty_circuit(self):
         c = zx.Circuit(3)
         t = SigmaTracker(c).propagate()
-        assert t.cost == 0
-        assert len(t.expensive_ops) == 0
+        self.assertEqual(t.cost, 0)
+        self.assertEqual(len(t.expensive_ops), 0)
 
-    def test_h_only_circuit(self, tracker_factory):
-        t = tracker_factory(1, [("H", 0), ("H", 0), ("H", 0)], [R])
-        assert t.cost == 0
-        assert t.final_flavors() == [Rp]  # odd number of H's
+    def test_h_only_circuit(self):
+        t = make_tracker(1, [("H", 0), ("H", 0), ("H", 0)], [R])
+        self.assertEqual(t.cost, 0)
+        self.assertEqual(t.final_flavors(), [Rp])  # odd number of H's
 
     def test_assignment_length_mismatch(self):
         c = zx.Circuit(3)
-        with pytest.raises(ValueError, match="Assignment length"):
+        with self.assertRaisesRegex(ValueError, "Assignment length"):
             SigmaTracker(c, [R, R])
 
     def test_set_assignment_invalidates_cache(self):
         c = make_circuit(1, [("T", 0)])
         t = SigmaTracker(c, [Rp]).propagate()
-        assert t.cost == 1
+        self.assertEqual(t.cost, 1)
         t.set_assignment([R]).propagate()
-        assert t.cost == 0
+        self.assertEqual(t.cost, 0)
 
-    def test_summary_contains_key_info(self, tracker_factory):
-        t = tracker_factory(2, [("T", 0)], [Rp, R])
+    def test_summary_contains_key_info(self):
+        t = make_tracker(2, [("T", 0)], [Rp, R])
         s = t.summary()
-        assert "MSD" in s
-        assert "R'" in s
+        self.assertIn("MSD", s)
+        self.assertIn("R'", s)
 
 
 # ===================================================================
@@ -451,7 +447,7 @@ def _naive_pareto_corners(points: list[tuple[int, int]]) -> set[tuple[int, int]]
     return {p for p in distinct if not any(_dominates(q, p) for q in distinct if q != p)}
 
 
-class TestParetoAssignments:
+class TestParetoAssignments(unittest.TestCase):
     """Exact, weight-free Pareto frontier over the 2^n initial assignments."""
 
     def test_matches_naive_dominance_filter(self) -> None:
@@ -467,7 +463,7 @@ class TestParetoAssignments:
 
             naive_corners = _naive_pareto_corners(_all_assignment_points(t))
 
-            assert frontier_corners == naive_corners
+            self.assertEqual(frontier_corners, naive_corners)
 
     def test_frontier_points_are_achievable(self) -> None:
         rng = random.Random(5678)
@@ -479,8 +475,8 @@ class TestParetoAssignments:
 
             for assignment, rr, msd in t.pareto_assignments():
                 t.set_assignment(assignment).propagate()
-                assert t.round_robin_count == rr
-                assert t.msd_count == msd
+                self.assertEqual(t.round_robin_count, rr)
+                self.assertEqual(t.msd_count, msd)
 
     def test_weighted_argmin_lies_on_frontier(self) -> None:
         # Continuous, strictly-positive weights avoid degenerate ties: any
@@ -502,7 +498,7 @@ class TestParetoAssignments:
             t.optimize_assignment()
             point = (t.round_robin_count, t.msd_count)
 
-            assert not any(_dominates((frr, fmsd), point) for _, frr, fmsd in frontier)
+            self.assertFalse(any(_dominates((frr, fmsd), point) for _, frr, fmsd in frontier))
 
     def test_frontier_is_a_proper_staircase(self) -> None:
         rng = random.Random(2026)
@@ -516,13 +512,17 @@ class TestParetoAssignments:
             rrs = [rr for _, rr, _ in frontier]
             msds = [msd for _, _, msd in frontier]
 
-            assert rrs == sorted(rrs)
-            assert len(set(rrs)) == len(rrs)
-            assert len(set(msds)) == len(msds)
-            assert all(msds[i] > msds[i + 1] for i in range(len(msds) - 1))
+            self.assertEqual(rrs, sorted(rrs))
+            self.assertEqual(len(set(rrs)), len(rrs))
+            self.assertEqual(len(set(msds)), len(msds))
+            self.assertTrue(all(msds[i] > msds[i + 1] for i in range(len(msds) - 1)))
 
     def test_rejects_large_n(self) -> None:
         c = zx.Circuit(25)
         t = SigmaTracker(c)
-        with pytest.raises(ValueError, match="infeasible"):
+        with self.assertRaisesRegex(ValueError, "infeasible"):
             t.pareto_assignments()
+
+
+if __name__ == '__main__':
+    unittest.main()
