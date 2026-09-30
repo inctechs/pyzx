@@ -1,4 +1,4 @@
-# PyZX - Python library for quantum circuit rewriting 
+# PyZX - Python library for quantum circuit rewriting
 #        and optimization using the ZX-calculus
 # Copyright (C) 2018 - Aleks Kissinger and John van de Wetering
 
@@ -14,11 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List
+from fractions import Fraction
 
 from . import Circuit
 from .gates import *
-from fractions import Fraction
+
 
 def parse_qsim(data: str) -> Circuit:
     """Produces a :class:`Circuit` based on a .qsim description of a circuit."""
@@ -29,7 +29,7 @@ def parse_qsim(data: str) -> Circuit:
     except ValueError:
         raise ValueError('First line should be qubit count')
 
-    gates: List[Gate] = []
+    gates: list[Gate] = []
 
     for l in lines:
         l = l.strip()

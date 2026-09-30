@@ -1,4 +1,4 @@
-# PyZX - Python library for quantum circuit rewriting 
+# PyZX - Python library for quantum circuit rewriting
 #        and optimization using the ZX-calculus
 # Copyright (C) 2018 - Aleks Kissinger and John van de Wetering
 
@@ -14,24 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
-
 from .base import BaseGraph
 from .graph_s import GraphS
 from .multigraph import Multigraph
 
 try:
-	import quizx # type: ignore
+	import quizx  # type: ignore
 except ImportError:
 	quizx = None
 
 backends = { 'simple': True, 'multigraph': True, 'quizx-vec': False if quizx is None else True }
 
-def Graph(backend:Optional[str]=None) -> BaseGraph:
-	"""Returns an instance of an implementation of :class:`~pyzx.graph.base.BaseGraph`. 
-	By default :class:`~pyzx.graph.graph_s.GraphS` is used. 
+def Graph(backend: str | None = None) -> BaseGraph:
+	"""Returns an instance of an implementation of :class:`~pyzx.graph.base.BaseGraph`.
+	By default :class:`~pyzx.graph.graph_s.GraphS` is used.
 	Currently ``backend`` is allowed to be `simple` (for the default),
-	or 'graph_tool' and 'igraph'.
+	`multigraph` (for allowing parallel edges), or `quizx-vec` (if QuiZX is installed).
 	This method is the preferred way to instantiate a ZX-diagram in PyZX.
 
 	Example:
@@ -45,25 +43,9 @@ def Graph(backend:Optional[str]=None) -> BaseGraph:
 		raise KeyError("Unavailable backend '{}'".format(backend))
 	if backend == 'simple': return GraphS()
 	if backend == 'multigraph': return Multigraph()
-	if backend == 'graph_tool': 
-		return GraphGT()
-	if backend == 'igraph': return GraphIG()
 	if backend == 'quizx-vec': return quizx.VecGraph()
 	return GraphS()
 
 Graph.from_json = GraphS.from_json # type: ignore
 Graph.from_tikz = GraphS.from_tikz # type: ignore
 Graph.load = GraphS.load # type: ignore
-
-try:
-	import graph_tool.all as gt
-	from .graph_gt import GraphGT
-	backends['graph_tool'] = gt
-except ImportError:
-	pass
-try:
-	import igraph as ig
-	from .graph_ig import GraphIG
-	backends['igraph'] = ig 
-except ImportError:
-	pass

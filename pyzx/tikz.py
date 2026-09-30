@@ -64,7 +64,6 @@ def _to_tikz(g: BaseGraph[VT,ET], draw_scalar:bool = False,
         s = "        \\node [style=none] ({:d}) at ({:.2f}, {:.2f}) {{{:s}}};".format(idoffset,x,y,scalar)
         idoffset += 1
         verts.append(s)
-    maxindex = idoffset
 
     for v in g.vertices():
         ty = g.type(v)
@@ -76,7 +75,6 @@ def _to_tikz(g: BaseGraph[VT,ET], draw_scalar:bool = False,
             y = - g.qubit(v) - yoffset
             s = f"        \\node [style={style}] ({v+idoffset}) at ({{x:.2f}}, {{y:.2f}}) {{{{{text}}}}};".format(x=x, y=y)
             verts.append(s)
-            maxindex = max([v+idoffset,maxindex])
             continue
         if ty == VertexType.Z_BOX:
             p = get_z_box_label(g,v)
@@ -122,22 +120,14 @@ def _to_tikz(g: BaseGraph[VT,ET], draw_scalar:bool = False,
         y = - g.qubit(v) - yoffset
         s = "        \\node [style={}] ({:d}) at ({:.2f}, {:.2f}) {{{:s}}};".format(style,v+idoffset,x,y,phase)
         verts.append(s)
-        maxindex = max([v+idoffset,maxindex])
     edges = []
     for e in g.edges():
         v,w = g.edge_st(e)
         et = g.edge_type(e)
         s = "        \\draw "
         if et == EdgeType.HADAMARD:
-            if g.type(v) != VertexType.BOUNDARY and g.type(w) != VertexType.BOUNDARY:
-                style = settings.tikz_classes['H-edge']
-                if style: s += "[style={:s}] ".format(style)
-            else:
-                x = (g.row(v) + g.row(w))/2.0 +xoffset
-                y = -(g.qubit(v)+g.qubit(w))/2.0 -yoffset
-                t = "        \\node [style={:s}] ({:d}) at ({:.2f}, {:.2f}) {{}};".format(settings.tikz_classes['H'],maxindex+1, x,y)
-                verts.append(t)
-                maxindex += 1
+            style = settings.tikz_classes['H-edge']
+            if style: s += "[style={:s}] ".format(style)
         elif et == EdgeType.W_IO:
             style = settings.tikz_classes['W-io-edge']
             if style: s += "[style={:s}] ".format(style)
@@ -178,8 +168,8 @@ def to_tikz(g: BaseGraph[VT,ET], draw_scalar:bool=False) -> str:
 def to_tikz_sequence(graphs:List[BaseGraph], draw_scalar:bool=False, maxwidth:FloatInt=10) -> str:
     """Given a list of ZX-graphs, outputs a single tikz diagram with the graphs presented in a grid.
     ``maxwidth`` is the maximum width of the diagram, before a graph is put on a new row in the tikz diagram."""
-    xoffset = -maxwidth
-    yoffset = -10
+    xoffset: FloatInt = -maxwidth
+    yoffset: FloatInt = -10
     idoffset = 0
     total_verts, total_edges = [],[]
     for g in graphs:
@@ -426,7 +416,7 @@ def tikz_to_graph(
     Args:
         s: a string containing a well-defined Tikz diagram.
         warn_overlap: If True raises a Warning if two vertices have the exact same position.
-        fuse_overlap: If True fuses two vertices that have the exact same position. Only has effect if fuse_overlap is False.
+        fuse_overlap: If True fuses two vertices that have the exact same position. Only has effect if warn_overlap is False.
         ignore_nonzx: If True suppresses most errors about unknown vertex/edge types and labels.
         backend: Backend of the graph returned.
         ignore_invalid_phases: If True, use default phase (0 for Z/X spiders, 1 for H-boxes

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyzx"
-version = "0.10.3"
+version = "0.10.6"
 description = "Library for quantum circuit rewriting and optimisation using the ZX-calculus"
 readme = "readme.md"
 license = "Apache-2.0"
@@ -18,6 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Development Status :: 4 - Beta",
 ]
@@ -38,13 +39,13 @@ Documentation = "https://pyzx.readthedocs.io/"
 [project.optional-dependencies]
 dev = [
     "matplotlib>=2.2",
-    "mypy~=1.5.1",
+    "mypy~=2.1.0",
     "types-tqdm~=4.66",
 ]
 test = [
     "qiskit~=1.0.0",
     "qiskit_qasm3_import~=0.4.2",
-    "mypy~=1.5.1",
+    "mypy~=2.1.0",
 ]
 docs = [
     "matplotlib>=2.2",
@@ -74,16 +75,24 @@ warn_return_any = false
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
+module = [
+    "pyzx.circuit.*",
+    "pyzx.graph.*",
+    "pyzx.local_search.*",
+    "pyzx.rewrite_rules.*",
+    "pyzx.routing.*",
+    "pyzx.web.*"
+]
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
 module = "pyzx.optimize"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
 module = [
     "numpy.*",
-    "igraph.*",
-    "graph_tool.*",
     "networkx.*",
-    "pyquil.*",
     "matplotlib.*",
     "pandas.*",
     "ipywidgets.*",
@@ -95,7 +104,7 @@ module = [
 ignore_missing_imports = true
 
 [tool.bumpversion]
-current_version = "0.10.3"
+current_version = "0.10.6"
 commit = true
 tag = true
 tag_name = "v{new_version}"

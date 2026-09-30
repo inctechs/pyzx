@@ -32,12 +32,12 @@ __all__ = ['check_edge',
            'add_Z_identity',
            'unsafe_add_Z_identity']
 
-from pyzx.utils import EdgeType, VertexType
-from pyzx.graph.base import BaseGraph, VT, ET, upair
+from ..utils import EdgeType, VertexType
+from ..graph.base import BaseGraph, VT, ET, upair
 
 
 
-def check_edge(g: BaseGraph[VT,ET], v:VT, w:VT) -> bool:
+def check_edge(g: BaseGraph[VT, ET], v:VT, w:VT) -> bool:
     """Checks if two vertices are connected by an unambiguous SIMPLE or HADAMARD edge.
 
     Returns False if `v` and `w` are the same vertex (self-loops are not
@@ -58,19 +58,19 @@ def check_edge(g: BaseGraph[VT,ET], v:VT, w:VT) -> bool:
         return False
     return True
 
-def add_Z_identity( g: BaseGraph[VT,ET], v:VT, w:VT) -> bool:
+def add_Z_identity( g: BaseGraph[VT, ET], v:VT, w:VT) -> bool:
     """First checks if the 2 given vertices are connected by an edge, and then adds a Z spider to that edge.
      """
     if check_edge(g,v,w): return unsafe_add_Z_identity(g,v,w)
     return False
 
 
-def unsafe_add_Z_identity(g: BaseGraph[VT,ET], v:VT, w:VT) -> bool:
+def unsafe_add_Z_identity(g: BaseGraph[VT, ET], v:VT, w:VT) -> bool:
     """Adds a Z spider to the edge given by the input vertices.
 
-    Assumes there is a unique edge type between `v` and `w`; on a multigraph
-    with mixed parallel edges, callers must pre-disambiguate (e.g. by gating
-    on :func:`check_edge`)."""
+    Requires a unique edge type between `v` and `w`; raises ``ValueError`` on
+    multigraphs with mixed parallel edges (the rule has no canonical edge to
+    act on in that case). Callers can pre-disambiguate via :func:`check_edge`."""
     etab = {}
 
     e = g.edge(v, w)

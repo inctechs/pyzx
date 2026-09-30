@@ -1,4 +1,4 @@
-# PyZX - Python library for quantum circuit rewriting 
+# PyZX - Python library for quantum circuit rewriting
 #        and optimization using the ZX-calculus
 # Copyright (C) 2018 - Aleks Kissinger and John van de Wetering
 
@@ -14,17 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Dict
-
 from . import Circuit
 from .gates import *
+
 
 def parse_qc(data: str) -> Circuit:
     """Produces a :class:`Circuit` based on a .qc description of a circuit.
     If a Tofolli gate with more than 2 controls is encountered, ancilla qubits are added.
     Currently up to 5 controls are supported."""
     preamble = data[:data.find("BEGIN")].strip().splitlines()
-    labels: Dict[str,int] = {}
+    labels: dict[str, int] = {}
     for l in preamble:
         if l.startswith('#'): continue
         if l.startswith('.'):
@@ -34,8 +33,8 @@ def parse_qc(data: str) -> Circuit:
         else:
             raise TypeError("Unknown Expression: " + l)
 
-    ancillas: Dict[int,int] = {}
-    gates: List[Gate] = []
+    ancillas: dict[int, int] = {}
+    gates: list[Gate] = []
     qcount = len(labels)
 
     for l in data[data.find("BEGIN")+6:data.find("END")].splitlines():

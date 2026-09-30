@@ -276,6 +276,122 @@ class TestSymbolicParsing(unittest.TestCase):
         expected = new_const(2) * ((self.new_var("x") + self.new_var("y")) ** 2)
         self.assertEqual(result, expected)
 
+    def test_division(self):
+        """Test division by a constant, including of symbolic expressions."""
+        # Division of a variable by an integer.
+        result = parse("x/2", self.new_var)
+        expected = self.new_var("x") / 2
+        self.assertEqual(result, expected)
+
+        # Negated variable divided by an integer.
+        result = parse("-x/4", self.new_var)
+        expected = -self.new_var("x") / 4
+        self.assertEqual(result, expected)
+
+        # Division binds at the same level as multiplication, left to right.
+        result = parse("2*x/4", self.new_var)
+        expected = new_const(2) * self.new_var("x") / 4
+        self.assertEqual(result, expected)
+
+        # Division of a parenthesized expression.
+        result = parse("(x + y)/2", self.new_var)
+        expected = (self.new_var("x") + self.new_var("y")) / 2
+        self.assertEqual(result, expected)
+
+        # Division of a power.
+        result = parse("x^2/2", self.new_var)
+        expected = (self.new_var("x") ** 2) / 2
+        self.assertEqual(result, expected)
+
+        # Division by an integer yields an exact Fraction coefficient.
+        result = parse("x/2", self.new_var)
+        self.assertEqual(result.terms[0][0], Fraction(1, 2))
+
+    def test_constant_fractions_remain_exact(self):
+        """Adding general division must not turn `1/2` or `pi/4` into floats."""
+        for expr, expected in [("1/2", Fraction(1, 2)), ("pi/4", Fraction(1, 4)),
+                               ("2*pi/3", Fraction(2, 3)), ("2pi/4", Fraction(1, 2))]:
+            result = parse(expr, self.new_var)
+            self.assertEqual(result, new_const(expected))
+            self.assertIsInstance(result.terms[0][0], Fraction)
+
+    def test_division_by_zero_raises(self):
+        """Division by any constant that evaluates to zero must raise.
+        """
+        from pyzx.symbolic import Poly
+        with self.assertRaises(ZeroDivisionError):
+            self.new_var("x") / 0
+        with self.assertRaises(ZeroDivisionError):
+            self.new_var("x") / new_const(0)
+        with self.assertRaises(ZeroDivisionError):
+            self.new_var("x") / Poly([])
+        with self.assertRaises(ZeroDivisionError):
+            Poly([]) / 0
+        with self.assertRaises(ZeroDivisionError):
+            Poly([]) / new_const(0)
+        for expr in ["x/0", "(x-x)/0", "(1-1)/0", "0/0"]:
+            with self.assertRaises(ZeroDivisionError,
+                                   msg=f"expected {expr!r} to raise"):
+                parse(expr, self.new_var)
+
+    def test_chained_division_is_left_associative(self):
+        """`x/2/3` must parse as `(x/2)/3`, not `x/(2/3)`.
+        """
+        for expr, expected in [
+                ("x/2/3", Fraction(1, 6)),
+                ("x/2/4", Fraction(1, 8)),
+                ("1/2/3", Fraction(1, 6)),
+        ]:
+            result = parse(expr, self.new_var)
+            self.assertEqual(result.terms[0][0], Fraction(expected),
+                             msg=f"{expr!r} coefficient")
+        result = parse("(x+y)/2/3", self.new_var)
+        expected_poly = (self.new_var("x") + self.new_var("y")) / 6
+        self.assertEqual(result, expected_poly)
+
+    def test_division_by_decimal_uses_limit_denominator(self):
+        """Decimal divisors go through `Fraction.limit_denominator`, so `x/2.5`
+        divides by `Fraction(5, 2)` and yields `2/5 x` exactly (not `0.4 x`)."""
+        result = parse("x/2.5", self.new_var)
+        expected = self.new_var("x") / Fraction(5, 2)
+        self.assertEqual(result, expected)
+        self.assertEqual(result.terms[0][0], Fraction(2, 5))
+        self.assertIsInstance(result.terms[0][0], Fraction)
+
+    def test_division_by_non_constant_rejected(self):
+        """Divisors must be constants; the grammar accepts them syntactically
+        but `Poly.__truediv__` and `parse` should refuse to evaluate."""
+        with self.assertRaises(ValueError):
+            self.new_var("x") / self.new_var("y")
+        with self.assertRaises(ValueError):
+            self.new_var("x") / (self.new_var("y") + 1)
+        for expr in ["x/y", "x/(y+1)", "x^2/x", "(x+1)/(x+1)", "x/(2*y)"]:
+            with self.assertRaises(ValueError, msg=f"expected {expr!r} to be rejected"):
+                parse(expr, self.new_var)
+
+    def test_division_by_complex_constant(self):
+        """`Poly.__truediv__` accepts complex divisors (symmetric with `__mul__`,
+        for the `Scalar`-side use case), yielding `complex` coefficients. This
+        path is only reachable via the Python API; the grammar has no complex
+        literal."""
+        x = self.new_var("x")
+        divisor = 2 + 3j
+        result = x / divisor
+        self.assertEqual(len(result.terms), 1)
+        coeff = result.terms[0][0]
+        self.assertIsInstance(coeff, complex)
+        self.assertEqual(coeff, 1 / divisor)
+
+    def test_pi_rejected_in_divisor(self):
+        """`pi` is a phase marker (== 1), and allowing it as a divisor silently results
+        in `x/pi == x`. Reject at parse time."""
+        for expr in ["x/pi", "x/(pi)", "x/pi^2", "x/(2*pi)", "x/(pi+1)", "x/(pi/2)"]:
+            with self.assertRaises(ValueError, msg=f"expected {expr!r} to be rejected"):
+                parse(expr, self.new_var)
+        # Check that `pi` in the dividend or as a multiplicative factor is still fine.
+        self.assertEqual(parse("pi/2", self.new_var), new_const(Fraction(1, 2)))
+        self.assertEqual(parse("pi*x/2", self.new_var), self.new_var("x") / 2)
+
 
 class TestBooleanIdempotency(unittest.TestCase):
 
@@ -323,8 +439,19 @@ class TestPolyConjugate(unittest.TestCase):
 class TestSymbolicBooleanRewrite(unittest.TestCase):
 
     def test_t_injection_reduces_correctly(self):
-        """T injection should reduce to phase pi/4 regardless of measurement result."""
+        """`full_reduce` on a T-injection with a boolean-axel measurement outcome
+        must commute with substituting c[0].
 
+        Under the fix for issue #436, `full_reduce` no longer silently collapses
+        a boolean-axel gadget into a Pauli-negated phase (which produced the
+        c[0]=1 answer regardless of the actual boolean value); it preserves the
+        boolean structure. Correctness is expressed by tensor equivalence:
+        substituting c[0] into the reduced diagram yields the same linear map
+        as substituting c[0] into the unsimplified diagram, for both c[0]=0
+        and c[0]=1. `_r0` is the fresh boolean phase left by the leading
+        `reset` on the ancilla; we substitute it to 0 on both sides so the
+        tensors are concrete.
+        """
         circ = zx.qasm("""
 OPENQASM 2.0;
 include "qelib1.inc";
@@ -337,19 +464,15 @@ cx q[0],q[1];
 measure q[1] -> c[0];
 if (c==1) s q[0];
 """)
-        g = circ.to_graph()
-        zx.full_reduce(g)
-        # The leading `reset` on a fresh input leaves an orphan discard
-        # component with a fresh boolean phase that `full_reduce` does not
-        # remove. Drop it so only the injected phase remains.
-        zx.drop_orphan_reset_discards(g)
-
-        phases = g.phases()
-        non_zero = {v: p for v, p in phases.items() if p != 0}
-        self.assertEqual(len(non_zero), 1, f"Expected 1 non-zero phase, got {non_zero}")
-
-        actual_phase = list(non_zero.values())[0]
-        self.assertEqual(actual_phase, Fraction(1, 4), f"Expected Fraction(1,4), got {actual_phase}")
+        g_ref = circ.to_graph()
+        g_simp = circ.to_graph()
+        zx.full_reduce(g_simp)
+        for c_val in (0, 1):
+            subs = {'c[0]': Fraction(c_val), '_r0': Fraction(0)}
+            ref = g_ref.substitute_variables(subs)
+            got = g_simp.substitute_variables(subs)
+            self.assertTrue(zx.compare_tensors(ref, got, preserve_scalar=True),
+                            f"full_reduce diverged from reference for c[0]={c_val}")
 
 
 

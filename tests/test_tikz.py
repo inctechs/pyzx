@@ -26,6 +26,7 @@ from pyzx.utils import EdgeType, VertexType
 from pyzx.tikz import tikz_to_graph, to_tikz
 from pyzx.graph.graph import Graph
 from pyzx.graph.jsonparser import string_to_phase
+from pyzx.tensor import compare_tensors
 
 
 class TestTikzErrorHandling(unittest.TestCase):
@@ -209,17 +210,23 @@ class TestTikzErrorHandling(unittest.TestCase):
         self.assertEqual(str(g.phase(v)), "1/2⋅alpha")
 
     def test_latex_fraction_numeric_phase_label(self):
-        """Numeric LaTeX fractions take the string_to_phase path after normalisation."""
-        tikz = r'''\begin{tikzpicture}
+        """Numeric LaTeX fractions parse back to a Fraction, not a constant Poly (issue #471)."""
+        for label, expected in [(r"\frac{\pi}{4}", Fraction(1, 4)),
+                                (r"\frac{3\pi}{4}", Fraction(3, 4)),
+                                (r"\frac{\pi}{2}", Fraction(1, 2)),
+                                (r"\frac{2\pi}{3}", Fraction(2, 3))]:
+            with self.subTest(label=label):
+                tikz = r'''\begin{tikzpicture}
 \begin{pgfonlayer}{nodelayer}
-\node [style=green dot] (0) at (0, 0) {$\frac{\pi}{4}$};
+\node [style=green dot] (0) at (0, 0) {$%s$};
 \end{pgfonlayer}
 \begin{pgfonlayer}{edgelayer}
 \end{pgfonlayer}
-\end{tikzpicture}'''
-        g = tikz_to_graph(tikz, warn_overlap=False)
-        v = list(g.vertices())[0]
-        self.assertEqual(g.phase(v), Fraction(1, 4))
+\end{tikzpicture}''' % label
+                g = tikz_to_graph(tikz, warn_overlap=False)
+                v = list(g.vertices())[0]
+                self.assertEqual(g.phase(v), expected)
+                self.assertIsInstance(g.phase(v), Fraction)
 
     def test_latex_fraction_pi_suffix_phase_label(self):
         """The normaliser also handles fraction forms with a trailing pi."""
@@ -233,6 +240,49 @@ class TestTikzErrorHandling(unittest.TestCase):
         g = tikz_to_graph(tikz, warn_overlap=False)
         v = list(g.vertices())[0]
         self.assertEqual(g.phase(v), Fraction(3, 2))
+        self.assertIsInstance(g.phase(v), Fraction)
+
+    def test_tikz_round_trip_preserves_numeric_phase_type(self):
+        """A numeric phase survives a to_tikz/tikz_to_graph round trip as a Fraction, not a Poly (issue #471)."""
+        g = Graph()
+        v = g.add_vertex(VertexType.Z, 0, 0)
+        g.set_phase(v, Fraction(1, 4))
+        g2 = tikz_to_graph(to_tikz(g), warn_overlap=False)
+        w = next(u for u in g2.vertices() if g2.type(u) == VertexType.Z)
+        self.assertEqual(g2.phase(w), Fraction(1, 4))
+        self.assertIsInstance(g2.phase(w), Fraction)
+
+    def test_malformed_numeric_fraction_not_silently_accepted(self):
+        """A malformed numerator (empty or trailing operator) is rejected, not read as 1/den (issue #471)."""
+        for label in [r"\frac{}{4}", r"\frac{\pi*}{4}"]:
+            with self.subTest(label=label):
+                tikz = r'''\begin{tikzpicture}
+\begin{pgfonlayer}{nodelayer}
+\node [style=z spider] (0) at (0, 0) {$%s$};
+\end{pgfonlayer}
+\begin{pgfonlayer}{edgelayer}
+\end{pgfonlayer}
+\end{tikzpicture}''' % label
+                with self.assertRaises(ValueError):
+                    tikz_to_graph(tikz, warn_overlap=False)
+                g = tikz_to_graph(tikz, warn_overlap=False, ignore_invalid_phases=True)
+                v = list(g.vertices())[0]
+                self.assertEqual(g.phase(v), 0)
+
+    def test_zero_denominator_fraction_does_not_crash(self):
+        """A zero denominator is rejected cleanly (ValueError or fallback), not an uncaught error (issue #471)."""
+        tikz = r'''\begin{tikzpicture}
+\begin{pgfonlayer}{nodelayer}
+\node [style=z spider] (0) at (0, 0) {$\frac{\pi}{0}$};
+\end{pgfonlayer}
+\begin{pgfonlayer}{edgelayer}
+\end{pgfonlayer}
+\end{tikzpicture}'''
+        with self.assertRaises(ValueError):
+            tikz_to_graph(tikz, warn_overlap=False)
+        g = tikz_to_graph(tikz, warn_overlap=False, ignore_invalid_phases=True)
+        v = list(g.vertices())[0]
+        self.assertEqual(g.phase(v), 0)
 
     def test_latex_symbolic_hbox_phase_label(self):
         """H-box labels use the normalised phase parser when not complex."""
@@ -509,6 +559,77 @@ class TestTikzIdentityNodeRemoval(unittest.TestCase):
         vertices = list(g.vertices())
         e = g.edge(vertices[0], vertices[1])
         self.assertEqual(g.edge_type(e), EdgeType.W_IO)
+
+
+class TestTikzBoundaryHadamardEdges(unittest.TestCase):
+    """Hadamard edges touching a boundary survive a to_tikz round trip (issue #496)."""
+
+    @staticmethod
+    def _wire(edge_types):
+        """A single qubit wire of Z spiders whose edges have the given types."""
+        g = Graph()
+        vs = [g.add_vertex(VertexType.BOUNDARY, 0, 0)]
+        for i in range(len(edge_types) - 1):
+            vs.append(g.add_vertex(VertexType.Z, 0, i + 1))
+        vs.append(g.add_vertex(VertexType.BOUNDARY, 0, len(edge_types)))
+        for (v, w), et in zip(zip(vs, vs[1:]), edge_types):
+            g.add_edge((v, w), et)
+        g.set_inputs((vs[0],))
+        g.set_outputs((vs[-1],))
+        return g
+
+    @staticmethod
+    def _hadamard_edges(g):
+        return sum(1 for e in g.edges() if g.edge_type(e) == EdgeType.HADAMARD)
+
+    def _round_trip(self, g):
+        g2 = tikz_to_graph(to_tikz(g), warn_overlap=False)
+        g2.auto_detect_io()
+        return g2
+
+    def test_boundary_hadamard_edge_uses_the_hadamard_edge_style(self):
+        """A boundary Hadamard is a styled edge, not a node that no \\draw references."""
+        g = self._wire([EdgeType.HADAMARD, EdgeType.SIMPLE])
+        tikz = to_tikz(g)
+        self.assertIn(r"\draw [style=hadamard edge]", tikz)
+        self.assertNotIn(r"\node [style=hadamard]", tikz)
+
+    def test_hadamard_edge_at_input_boundary_round_trips(self):
+        """An H-edge on the input boundary comes back as an H-edge."""
+        g = self._wire([EdgeType.HADAMARD, EdgeType.SIMPLE])
+        g2 = self._round_trip(g)
+        self.assertEqual(self._hadamard_edges(g2), self._hadamard_edges(g))
+        self.assertEqual([v for v in g2.vertices() if g2.type(v) == VertexType.H_BOX], [])
+        self.assertTrue(compare_tensors(g, g2))
+
+    def test_hadamard_edge_at_output_boundary_round_trips(self):
+        """The boundary test is symmetric, so the output side must behave the same."""
+        g = self._wire([EdgeType.SIMPLE, EdgeType.HADAMARD])
+        g2 = self._round_trip(g)
+        self.assertEqual(self._hadamard_edges(g2), self._hadamard_edges(g))
+        self.assertEqual([v for v in g2.vertices() if g2.type(v) == VertexType.H_BOX], [])
+        self.assertTrue(compare_tensors(g, g2))
+
+    def test_hadamard_edges_at_both_boundaries_round_trip(self):
+        """Both boundaries at once, with an interior H-edge that was never affected."""
+        g = self._wire([EdgeType.HADAMARD, EdgeType.HADAMARD, EdgeType.HADAMARD])
+        g2 = self._round_trip(g)
+        self.assertEqual(self._hadamard_edges(g2), 3)
+        self.assertEqual([v for v in g2.vertices() if g2.type(v) == VertexType.H_BOX], [])
+        self.assertTrue(compare_tensors(g, g2))
+
+    def test_boundary_hadamard_preserves_the_scalar(self):
+        """An H-edge must not come back as an H-box, which differs from it by a factor sqrt(2)."""
+        g = self._wire([EdgeType.HADAMARD, EdgeType.SIMPLE])
+        g2 = self._round_trip(g)
+        self.assertTrue(compare_tensors(g, g2, preserve_scalar=True))
+
+    def test_interior_hadamard_edge_still_round_trips(self):
+        """The non-boundary path is unchanged."""
+        g = self._wire([EdgeType.SIMPLE, EdgeType.HADAMARD, EdgeType.SIMPLE])
+        g2 = self._round_trip(g)
+        self.assertEqual(self._hadamard_edges(g2), 1)
+        self.assertTrue(compare_tensors(g, g2))
 
 
 if __name__ == '__main__':

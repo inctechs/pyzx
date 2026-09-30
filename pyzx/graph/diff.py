@@ -1,4 +1,4 @@
-# PyZX - Python library for quantum circuit rewriting 
+# PyZX - Python library for quantum circuit rewriting
 #        and optimization using the ZX-calculus
 # Copyright (C) 2018 - Aleks Kissinger and John van de Wetering
 
@@ -17,32 +17,37 @@
 import copy
 import json
 from collections import Counter
-from typing import Any, Callable, Generic, Optional, List, Dict, Tuple
+from collections.abc import Callable
+from typing import Any, Generic
 
-from ..utils import VertexType, EdgeType, FractionLike, FloatInt, phase_to_s
-from .base import BaseGraph, VT, ET
+from ..symbolic import VarRegistry
+from ..utils import EdgeType, FloatInt, FractionLike, VertexType, phase_to_s
+from .base import ET, VT, BaseGraph
 from .graph_s import GraphS
 from .jsonparser import string_to_phase
-from ..symbolic import VarRegistry
+from .scalar import Scalar
+
 
 class GraphDiff(Generic[VT, ET]):
-    removed_verts: List[VT]
-    new_verts: List[VT]
-    removed_edges: List[ET]
-    new_edges: List[Tuple[Tuple[VT,VT],EdgeType]]
-    changed_vertex_types: Dict[VT,VertexType]
-    changed_edge_types: Dict[ET, EdgeType]
-    changed_phases: Dict[VT, FractionLike]
-    changed_pos: Dict[VT, Tuple[FloatInt,FloatInt]]
-    changed_vdata: Dict[VT, Any]
-    changed_edata: Dict[ET, Any]
-    variable_types: Dict[str,bool]
+    removed_verts: list[VT]
+    new_verts: list[VT]
+    removed_edges: list[ET]
+    new_edges: list[tuple[tuple[VT, VT],EdgeType]]
+    changed_vertex_types: dict[VT,VertexType]
+    changed_edge_types: dict[ET, EdgeType]
+    changed_phases: dict[VT, FractionLike]
+    changed_pos: dict[VT, tuple[FloatInt, FloatInt]]
+    changed_vdata: dict[VT, Any]
+    changed_edata: dict[ET, Any]
+    variable_types: dict[str, bool]
     var_registry: VarRegistry
+    changed_scalar: Scalar | None
 
-    def __init__(self, g1: BaseGraph[VT,ET], g2: BaseGraph[VT,ET]) -> None:
+    def __init__(self, g1: BaseGraph[VT, ET], g2: BaseGraph[VT, ET]) -> None:
         self.calculate_diff(g1,g2)
 
-    def calculate_diff(self, g1: BaseGraph[VT,ET], g2: BaseGraph[VT,ET]) -> None:
+    def calculate_diff(self, g1: BaseGraph[VT, ET], g2: BaseGraph[VT, ET]) -> None:
+        self.changed_scalar = g2.scalar.copy() if g1.scalar != g2.scalar else None
         self.changed_vertex_types = {}
         self.changed_edge_types = {}
         self.changed_phases = {}
@@ -60,8 +65,8 @@ class GraphDiff(Generic[VT, ET]):
         new_verts = g2.vertex_set()
         self.removed_verts = list(old_verts - new_verts)
         self.new_verts = list(new_verts - old_verts)
-        old_edges = g1.edge_set()
-        new_edges = g2.edge_set()
+        old_edges = Counter(g1.edge_set())
+        new_edges = Counter(g2.edge_set())
         self.new_edges = []
         self.removed_edges = []
 
@@ -111,7 +116,7 @@ class GraphDiff(Generic[VT, ET]):
                 if d2:
                     self.changed_edata[e] = d2
 
-    def apply_diff(self,g: BaseGraph[VT,ET]) -> BaseGraph[VT,ET]:
+    def apply_diff(self,g: BaseGraph[VT, ET]) -> BaseGraph[VT, ET]:
         g = copy.deepcopy(g)
         g.remove_edges(self.removed_edges)
         g.remove_vertices(self.removed_verts)
@@ -153,10 +158,12 @@ class GraphDiff(Generic[VT, ET]):
 
         for name in self.var_registry.vars():
             g.var_registry.set_type(name, self.var_registry.get_type(name))
+        if self.changed_scalar is not None:
+            g.scalar = self.changed_scalar.copy()
         g.rebind_variables_to_registry()
         return g
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         changed_edge_types_str_dict = {}
         for key, value in self.changed_edge_types.items():
             changed_edge_types_str_dict[f"{key[0]},{key[1]}"] = value # type: ignore
@@ -164,7 +171,7 @@ class GraphDiff(Generic[VT, ET]):
         for key, value in self.changed_edata.items():
             changed_edata_str_dict[f"{key[0]},{key[1]}"] = value # type: ignore
         changed_phases_str = {k: phase_to_s(v, limit_denominator=False) for k, v in self.changed_phases.items()}
-        return {
+        diff = {
             "removed_verts": self.removed_verts,
             "new_verts": self.new_verts,
             "removed_edges": self.removed_edges,
@@ -177,6 +184,9 @@ class GraphDiff(Generic[VT, ET]):
             "changed_edata": changed_edata_str_dict,
             "variable_types": self.var_registry.types,
         }
+        if self.changed_scalar is not None:
+            diff["changed_scalar"] = self.changed_scalar.to_dict()
+        return diff
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict())
@@ -184,7 +194,7 @@ class GraphDiff(Generic[VT, ET]):
     @staticmethod
     def from_json(json_str: str) -> "GraphDiff":
         d = json.loads(json_str)
-        gd = GraphDiff(GraphS(),GraphS())
+        gd = GraphDiff(GraphS(), GraphS())
         gd.var_registry = VarRegistry()
         for name, is_bool in d["variable_types"].items():
             gd.var_registry.set_type(name, is_bool)
@@ -201,7 +211,9 @@ class GraphDiff(Generic[VT, ET]):
             gd.changed_edata = map_dict_keys(d["changed_edata"], lambda x: tuple(map(int, x.split(","))))
         else:
             gd.changed_edata = {}
+        changed_scalar = d.get("changed_scalar")
+        gd.changed_scalar = Scalar.from_json(changed_scalar) if changed_scalar is not None else None
         return gd
 
-def map_dict_keys(d: Dict[str, Any], f: Callable[[str], Any]) -> Dict[Any, Any]:
+def map_dict_keys(d: dict[str, Any], f: Callable[[str], Any]) -> dict[Any, Any]:
     return {f(k): v for k, v in d.items()}

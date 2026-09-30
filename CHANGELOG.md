@@ -8,8 +8,50 @@ Hence, occasionally changes will be backwards incompatible (although they will a
 
 ## [Unreleased]
 
+### Fixed
+- Pauli-flow finder now correctly accounts for Pauli-Y vertices in correction sets.
+- Moved `RootHeuristic.RootHeuristicProtocol` and `SplitHeuristic.SplitHeuristicProtocol` to module level to fix a `DeprecationWarning` in Python 3.11+. Though these classes exist only for type annotations, this is technically a breaking change. (by @96-LB)
+- The `pyzx.web` module now raises an error when computing Pauli webs of a graph which has H-boxes with non-default phase, instead of returning an invalid web which ignores the phase. (by @96-LB)
+
+### Removed
+- Support for the PyQuil compiler was dropped. Breaking changes include the removal of `PyQuilCircuit`, `Architecture.to_quil_device`, `CompileMode.QUIL_COMPILER`, and any related functionality in the scripts module. (by @96-LB)
+- Support for the `graph_tool` and `igraph` backends has been officially dropped. (by @96-LB)
+
+## [0.10.6] - 2026-09-01
+
+### Fixed
+- `GraphDiff` now tracks, applies, and serializes changes to a graph's global scalar. (by @RazinShaikh)
+- Automatic tensor contraction now falls back to the naive strategy for diagrams containing vertex types other than boundaries, Z-spiders, or X-spiders, fixing default contraction for W-spiders and Z-boxes (by @henriquejsza).
+- `to_tikz` no longer drops Hadamards on edges that touch a boundary. Such an edge was exported as a plain wire plus a `hadamard` node that no `\draw` referenced, so the Hadamard was lost on reimport and the diagram gained a disconnected H-box. These edges now use the same `hadamard edge` style as every other Hadamard edge (by @gauthamkanagaraj).
+- `match_phase_gadgets` no longer treats a symbolic boolean axel as constant pi in its scalar and `phase_negate` bookkeeping. Symbolic-axel parity groups are skipped by default; opt in via `apply_to_boolean_axels=True` on `merge_phase_gadgets_for_simp`/`_for_apply`. (by @dlyongemallo)
+
+### Added
+- Added support for the ZW-Bialgebra rule (by @doczenwiry).
+
+## [0.10.5] - 2026-08-01
+
+### Fixed
+- `string_to_phase` no longer returns a constant `Poly` for a numeric expression that misses its fast parsing path (e.g. the `(1)*1/4` form the TikZ importer produces for `\frac{\pi}{4}`): a parse result without free variables is now collapsed to a `Fraction`. Such a `Poly` compared and printed like its numeric value but broke code that branches on the phase type, e.g. `to_tensor`/`to_matrix` raised `Can't convert diagram with parameters to tensor` after a `to_tikz`/`tikz_to_graph` round trip (by @gauthamkanagaraj).
+- Correctly handling custom gate identifiers ending in `gate` (by @dlyongemallo).
+- `Circuit.from_qasm` routes through the symbolic grammar and accepts parenthesised subexpressions in gate phase arguments, e.g., `rz((pi/2 + pi/4)) q[0];` or `u3(pi, (a+b)/2, c) q[0];` (by @dlyongemallo).
+- Register identifier validation more closely matches OpenQASM 2 and 3 specs (by @dlyongemallo).
+
+### Added
+- `Circuit.from_qasm` supports parametrised custom gate definitions, e.g., `gate phase_kick(theta) q { rz(theta) q; ... }` (by @dlyongemallo).
+- The symbolic expression parser (`pyzx.symbolic.parse`) now accepts division, e.g., `theta/2` or `(x + y)/2`. Divisors must be rational (or complex) constants; division by an integer produces an exact `Fraction` coefficient. As a side effect, `^` binds tighter than `*` and `/`. (by @dlyongemallo)
+- Regression test for `unsafe_pivot` with boolean pivot phases (by @dlyongemallo).
+- Added support for zooming in D3 drawings (by @doczenwiry).
+- `apply_to_boolean_axels` opt-in flag to `(unsafe_)pauli_push`, so boolean parameters are not transformed into non-boolean phase by default (by @dlyongemallo).
+- Added support for the detection/highlighting of overlapping nodes in D3 drawings (by @doczenwiry).
+
+### Changed
+- `Multigraph.edge(s, t)` now raises `ValueError` on ambiguous mixed-type parallel edges or when no matching edge exists, instead of silently returning one; pass `et` to disambiguate. The `et` default is now `None` on `BaseGraph.edge` (`GraphS.edge` and `GraphIG.edge` ignore it). Internal callers were updated to match; as a side effect, `PauliWeb.add_edge` and `PauliWeb.graph_with_errors` now propagate this error rather than silently preferring the `SIMPLE` edge (by @dlyongemallo).
+
+## [0.10.4] - 2026-07-01
+
 ### Added
 - Added the "magic cat" decomposition strategy from https://arxiv.org/pdf/2202.09202 (which previously only existed in Quizx). (by @mjsutcliffe99).
+- `settings.strict_phase_types` (default `True`) rejects float phases at `set_phase`/`add_to_phase` rather than letting them flow into the graph and crash downstream rewrite rules. Set to `False` to opt in to automatic conversion to `Fraction` using `settings.float_to_fraction_max_denominator`, accepting the resulting precision loss. Fixes crash in `full_reduce` with non-Clifford spiders (by @dlyongemallo).
 
 ## [0.10.3] - 2026-06-01
 
@@ -24,11 +66,12 @@ Hence, occasionally changes will be backwards incompatible (although they will a
 ### Changed
 - Refactored the simulation API to make it more formulaic and extensible. Individual decompositions are no longer included as distinct functions inside pyzx.simulate.py but now are provided their own individual files under pyzx.simulation.decompositions and share a common caller function. For example, pyzx.simulate.apply_cat3(g,v) is instead now pyzx.simulation.apply_decomp(Decomp.CAT_3,g,v), etc. (by @mjsutcliffe99).
 - Likewise, decomposition strategies are separated into individual files under pyzx.simulation.strategies and called similarly through e.g. zx.simulation.full_decompose(Strategy.BSS,g). (by @mjsutcliffe99).
+- `pivot_boundary_simp` and `pivot_gadget_simp` are now `RewriteSimpDoubleVertex` instances (previously `RewriteSimpGraph`), so their `is_match` and `apply` methods take two vertices `(v, w)` rather than a `List[VT]`. Whole-graph simplification (calling them as a function or via `simp()`) is unchanged. This is a breaking change for code that relied on the old `apply(graph, vertices)` signature. (by @dlyongemallo)
 
 ### Fixed
 - Multigraph handling of parallel mixed simple/Hadamard edges in tensor contraction, several rewrite rules, and `PauliWeb` (by @dlyongemallo).
 - Reset gate representation changed from ground-based to symbolic boolean paradigm, avoiding paradigm-mixing issues that destroyed measurement phases during simplification of circuits with mid-circuit resets. As a side effect, `graph_to_circuit` now recovers conditional X-type rotations (`NOT`, `XPhase`, `SX`), since X-type vertices on the qubit wire are unambiguous now that measurement outcomes are represented as leaves. `Circuit.to_graph` gains an opt-in `elide_initial_resets` flag (default `False`) that skips the discard chain for a `Reset` on an unmodified input wire, useful for circuits with OpenQASM-style implicit |0⟩ inputs. Each `_rN` reset variable is allocated to the lowest name not already in the graph's variable registry to avoid aliasing user-supplied phases, and `graph_to_circuit` excludes vertices on classical-bit wires (e.g. the `Z`/`X` pair from `DiscardBit`) so hybrid graphs round-trip without extra phantom qubits (by @dlyongemallo).
-* `match_pivot_boundary` skipped exclusion of grounded neighbours
+- The boundary and gadget pivot rules now correctly match the `(P2)` and `(P3)` rules in the paper [arXiv:1903.10477](https://doi.org/10.1103/PhysRevA.102.022406) when applied manually, e.g., from ZXLive (by @dlyongemallo).
 
 ## [0.10.2] - 2026-05-01
 
