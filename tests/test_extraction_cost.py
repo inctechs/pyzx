@@ -188,7 +188,7 @@ class TestForwardBackwardReconciliation(unittest.TestCase):
         for i in range(5):
             g = cliffordT(4, 30, p_t=0.3, p_cnot=0.3, seed=SEED + i)
             full_reduce(g, quiet=True)
-            initial_states = [random.randint(0, 1) for _ in range(g.qubit_count())]
+            initial_states = [random.randint(0, 1) for _ in range(int(g.qubit_count()))]
             with self.subTest(i=i):
                 self._assert_reconciles(g.clone(), initial_states, w=1.0, m=2.0, seed=i)
 
@@ -202,7 +202,7 @@ class TestMultiRestartNoRegression(unittest.TestCase):
         for i in range(5):
             g = cliffordT(4, 30, p_t=0.3, p_cnot=0.3, seed=SEED + i)
             full_reduce(g, quiet=True)
-            initial_states = [random.randint(0, 1) for _ in range(g.qubit_count())]
+            initial_states = [random.randint(0, 1) for _ in range(int(g.qubit_count()))]
             with self.subTest(i=i):
                 _, stats = multi_restart_extract(
                     g, initial_states, n_restarts=6, seed=i,

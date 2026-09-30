@@ -33,7 +33,7 @@ import random
 
 from .graph.base import BaseGraph, VT, ET
 
-from typing import Any, Generic, List, Optional, Tuple, Dict, Set, Union, Iterator
+from typing import Any, Generic, List, cast, Optional, Tuple, Dict, Set, Union, Iterator
 from dataclasses import dataclass
 
 
@@ -1158,7 +1158,7 @@ def _evaluate_lookahead(
     w_cz: float,
     w_msd: float,
     n_random: int = 0,
-    rng_seed: int = None,
+    rng_seed: Optional[int] = None,
 ) -> List[Tuple[int, int]]:
     """Evaluate CNOT alternatives with forward simulation, return best ops.
 
@@ -1657,7 +1657,7 @@ def multi_restart_extract(
             run_stat['reoptimized_cost'] = reoptimized_cost
             run_stat['reoptimized_rr'] = reopt_tracker.round_robin_count
             run_stat['reoptimized_msd'] = reopt_tracker.msd_count
-            selection_key = (reoptimized_cost, reopt_unweighted)
+            selection_key: Tuple[float, float] = (reoptimized_cost, reopt_unweighted)
         else:
             selection_key = (seed_cost, 0.0)
 
@@ -1677,7 +1677,8 @@ def multi_restart_extract(
         'reoptimize_selection': reoptimize_selection,
         'runs': run_stats,
     }
-    
+
+    assert best_circuit is not None, "n_restarts must be >= 1"
     return best_circuit, stats
 
 def multi_restart_extract_front_anchored(
@@ -2597,9 +2598,10 @@ def count_cnot_faults(circuit: 'Circuit', final_states: List[int], verbose: bool
         gate = circuit.gates[idx]
         name = gate.name
         if name == 'HAD':
-            states[gate.target] ^= 1
+            states[cast(HAD, gate).target] ^= 1
         elif name == 'CNOT':
-            ctrl, tgt = gate.control, gate.target
+            cnot = cast(CNOT, gate)
+            ctrl, tgt = cnot.control, cnot.target
             is_bad = (states[ctrl] == 0 and states[tgt] == 1)
             details.append({
                 'gate_index': idx,
@@ -2647,9 +2649,10 @@ def count_cz_faults(circuit: 'Circuit', final_states: List[int], verbose: bool =
         gate = circuit.gates[idx]
         name = gate.name
         if name == 'HAD':
-            states[gate.target] ^= 1
+            states[cast(HAD, gate).target] ^= 1
         elif name == 'CZ':
-            q1, q2 = gate.control, gate.target
+            cz = cast(CZ, gate)
+            q1, q2 = cz.control, cz.target
             is_bad = (states[q1] == 0 and states[q2] == 0)
             details.append({
                 'gate_index': idx,
